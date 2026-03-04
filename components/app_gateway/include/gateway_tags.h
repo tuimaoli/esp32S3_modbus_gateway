@@ -25,3 +25,7 @@
  * ============================================================ */
 #define TAG_ID_SYS_UPTIME       1000 ///< 网关系统运行时间 (Int32)
 #define TAG_ID_SYS_MEM_FREE     1001 ///< 网关剩余内存 (Int32)
+
+
+#define TAG_ID_ROOM2_STATUS 200
+#define TAG_ID_POWER_VOLTAGE 201

@@ -1,13 +1,13 @@
 /**
  * @file gateway.c
- * @brief 应用层：网关引擎核心实现
- * @note 组装底层硬件驱动 (BSP) 与中间件 (Middleware)，基于数据驱动模型配置传感器业务
+ * @brief 应用层：网关引擎核心实现 (融合 RS485、W5100S、Wi-Fi 三大物理层)
  */
 
 #include "gateway.h"
 #include "bsp_uart.h"
 #include "bsp_i2c.h"
 #include "bsp_w5100s.h"
+#include "bsp_wifi.h"       // 引入新加入的 Wi-Fi 驱动
 
 #include "register_map.h"
 #include "modbus_master.h"
@@ -17,110 +17,66 @@
 #include "esp_log.h"
 #include "gateway_tags.h"
 
+#define TAG_ID_ROOM2_STATUS  200
+#define TAG_ID_POWER_VOLTAGE 201
+#define TAG_ID_ROOM3_STATUS  300
+#define TAG_ID_WIFI_SENSOR_1 301
+
 static const char* TAG = "MAIN_GW";
 
 /* ============================================================
- * 1. 硬件资源静态分配表 (BSP 层配置)
- * ========================================== */
-static const bsp_rs485_config_t master_port_conf = {
-    .port_num   = 1,
-    .tx_io_num  = 17,
-    .rx_io_num  = 18,
-    .rts_io_num = 19,
-    .baud_rate  = 9600
-};
+ * 1. 硬件资源静态分配表
+ * ============================================================ */
+// ... (此处保留原有的 master_port_conf, i2c_conf, w5100s_conf 不变) ...
+static const bsp_rs485_config_t master_port_conf = { .port_num = 1, .tx_io_num = 17, .rx_io_num = 18, .rts_io_num = 19, .baud_rate = 9600 };
+static const bsp_i2c_config_t i2c_conf = { .port_num = 0, .sda_io = 4, .scl_io = 5, .clk_speed = 100000 };
+static const bsp_w5100s_config_t w5100s_conf = { .host_id = SPI2_HOST, .mosi_io = 13, .miso_io = 14, .sclk_io = 15, .cs_io = 16, .rst_io = 47, .clock_speed_mhz = 5 };
 
-static const bsp_rs485_config_t slave_port_conf = {
-    .port_num   = 2,
-    .tx_io_num  = 10,
-    .rx_io_num  = 11,
-    .rts_io_num = 12,
-    .baud_rate  = 9600
-};
-
-static const bsp_i2c_config_t i2c_conf = {
-    .port_num   = 0,
-    .sda_io     = 4,
-    .scl_io     = 5,
-    .clk_speed  = 100000
-};
-
-static const bsp_w5100s_config_t w5100s_conf = {
-    .host_id         = SPI2_HOST,
-    .mosi_io         = 13,
-    .miso_io         = 14,
-    .sclk_io         = 15,
-    .cs_io           = 16,
-    .rst_io          = 47,
-    .clock_speed_mhz = 5
+// 新增 Wi-Fi 账号密码配置
+static const bsp_wifi_config_t wifi_conf = {
+    .ssid     = "Factory_IOT_Net",
+    .password = "Admin12345"
 };
 
 /* ============================================================
- * 2. 业务层：数据驱动的 Modbus 映射规则字典 (取代硬编码解析)
+ * 2. 业务映射规则 (复用通用解析引擎)
  * ============================================================ */
-
-/** * @brief 房间 1 温湿度传感器的“字节萃取”规则表
- * @note 假设传感器返回 2 个寄存器(4字节)，全是 16 位有符号整数，真实值需乘以 0.1
- */
-static modbus_mapping_rule_t room1_rules[] = {
-    {
-        .target_tag_id = TAG_ID_ROOM1_TEMP, 
-        .byte_offset   = 0,                 // 从 payload 第 0 字节开始取
-        .bit_offset    = 0,
-        .type          = MB_TYPE_INT16_AB,  // 标准大端 16 位
-        .scale         = 0.1f               // 缩放系数：除以 10
-    },
-    {
-        .target_tag_id = TAG_ID_ROOM1_HUMI, 
-        .byte_offset   = 2,                 // 从 payload 第 2 字节开始取
-        .bit_offset    = 0,
-        .type          = MB_TYPE_INT16_AB, 
-        .scale         = 0.1f
-    }
-};
-
-/** @brief 房间 1 传感器画像实例 */
-static const sensor_profile_t room1_profile = {
-    .name          = "Room1_Env_Sensor",
-    .slave_id      = 1,
-    .func_code     = 0x03,
-    .start_reg     = 0x0000,
-    .reg_count     = 2,
-    .status_tag_id = TAG_ID_ROOM1_STATUS,
-    .rule_count    = sizeof(room1_rules) / sizeof(room1_rules[0]),
-    .mapping_rules = room1_rules,
-    .next          = NULL
-};
-
-/**
- * @brief 桥接函数：剥离 Modbus 协议头，将纯数据 Payload 喂给通用解析引擎
- */
+static modbus_mapping_rule_t room1_rules[] = { { .target_tag_id = TAG_ID_ROOM1_TEMP, .byte_offset = 0, .type = MB_TYPE_INT16_AB, .scale = 0.1f } };
+static const sensor_profile_t room1_profile = { .rule_count = 1, .mapping_rules = room1_rules };
 static void parser_room1_wrapper(const uint8_t *rx_buf, uint16_t len, uint16_t base_tag_id) {
-    if (len < 5) return; // 防御性拦截：长度非法
-    
-    uint8_t byte_count = rx_buf[2];
-    if (len < (3 + byte_count + 2)) return; // 防御性拦截：报文不完整
+    if (len >= 5) modbus_universal_parser(&rx_buf[3], rx_buf[2], &room1_profile);
+}
 
-    // 原始报文格式: [ID] [Func] [ByteCount] [Data...] [CRC_L] [CRC_H]
-    // 纯数据 payload 从 rx_buf[3] 开始
-    modbus_universal_parser(&rx_buf[3], byte_count, &room1_profile);
+// 给厂区 Wi-Fi 传感器加个规则
+static modbus_mapping_rule_t wifi_sensor_rules[] = { { .target_tag_id = TAG_ID_WIFI_SENSOR_1, .byte_offset = 0, .type = MB_TYPE_UINT16_AB, .scale = 1.0f } };
+static const sensor_profile_t wifi_sensor_profile = { .rule_count = 1, .mapping_rules = wifi_sensor_rules };
+static void parser_wifi_wrapper(const uint8_t *rx_buf, uint16_t len, uint16_t base_tag_id) {
+    if (len >= 5) modbus_universal_parser(&rx_buf[3], rx_buf[2], &wifi_sensor_profile);
 }
 
 /* ============================================================
- * 3. 任务与调度分配表
+ * 3. 三模态传感器组态列表！
  * ============================================================ */
-
-/** @brief 下发给轮询引擎的任务清单 */
 static const sensor_device_t SENSOR_LIST[] = {
     {
-        .name          = "Room1_Env_Node",
-        .slave_id      = room1_profile.slave_id,
-        .func_code     = room1_profile.func_code,
-        .start_reg     = room1_profile.start_reg,
-        .reg_count     = room1_profile.reg_count,
-        .base_tag_id   = 0, // 在通用模板引擎中已弃用该字段，由映射表接管
-        .status_tag_id = room1_profile.status_tag_id,
-        .parse_func    = parser_room1_wrapper
+        .name          = "Node1_RS485",
+        .transport     = MB_TRANSPORT_RTU,      // 物理层：RS485 串口
+        .slave_id      = 1, .func_code = 0x03, .start_reg = 0x00, .reg_count = 1,
+        .status_tag_id = TAG_ID_ROOM1_STATUS, .parse_func = parser_room1_wrapper
+    },
+    {
+        .name          = "Node2_W5100S",
+        .transport     = MB_TRANSPORT_TCP_W5100S, // 物理层：W5100S SPI 硬以太网
+        .target_ip     = {192, 168, 1, 100}, .target_port = 502,
+        .slave_id      = 1, .func_code = 0x03, .start_reg = 0x0100, .reg_count = 2,
+        .status_tag_id = TAG_ID_ROOM2_STATUS, .parse_func = parser_room1_wrapper 
+    },
+    {
+        .name          = "Node3_WiFi",
+        .transport     = MB_TRANSPORT_TCP_WIFI,   // 物理层：ESP32 Wi-Fi 软以太网
+        .target_ip     = {192, 168, 0, 50},  .target_port = 502,
+        .slave_id      = 1, .func_code = 0x03, .start_reg = 0x00, .reg_count = 1,
+        .status_tag_id = TAG_ID_ROOM3_STATUS, .parse_func = parser_wifi_wrapper
     }
 };
 #define SENSOR_COUNT (sizeof(SENSOR_LIST)/sizeof(sensor_device_t))
@@ -133,34 +89,25 @@ static void task_master_poll(void *arg) {
     }
 }
 
-/* ============================================================
- * 4. 网关生命周期控制接口
- * ============================================================ */
-
 void gateway_init(void) {
-    // 1. 硬件总线初始化
     bsp_rs485_init(&master_port_conf);
-    bsp_rs485_init(&slave_port_conf);
     bsp_i2c_init(&i2c_conf);
     
-    // 2. 数据中枢 (RTDB) 初始化
-    reg_map_init();
+    // 启动 LwIP 软协议栈及 Wi-Fi
+    bsp_wifi_init(&wifi_conf);
     
-    // 3. 动态构建数据字典 (注册逻辑 ID，替代魔法数字)
-    reg_map_add_tag(TAG_ID_ROOM1_TEMP,    "Room_Temp",    TAG_TYPE_FLOAT32, false);
-    reg_map_add_tag(TAG_ID_ROOM1_HUMI,    "Room_Humi",    TAG_TYPE_FLOAT32, false);
-    reg_map_add_tag(TAG_ID_ROOM1_STATUS,  "Room1_Status", TAG_TYPE_BOOL,    false);
-    reg_map_add_tag(TAG_ID_LOCAL_RELAY_1, "PCF_Relay1",   TAG_TYPE_BOOL,    true);
-    reg_map_add_tag(TAG_ID_LOCAL_RELAY_2, "PCF_Relay2",   TAG_TYPE_BOOL,    true);
-    
-    // 4. W5100S 纯硬件网络栈初始化
+    // 启动 W5100S 硬协议栈
     bsp_w5100s_init(&w5100s_conf);
+    
+    reg_map_init();
+    reg_map_add_tag(TAG_ID_ROOM1_TEMP,    "Room_Temp",    TAG_TYPE_FLOAT32, false);
+    reg_map_add_tag(TAG_ID_ROOM1_STATUS,  "Room1_Status", TAG_TYPE_BOOL,    false);
+    reg_map_add_tag(TAG_ID_ROOM3_STATUS,  "Room3_Status", TAG_TYPE_BOOL,    false);
+    reg_map_add_tag(TAG_ID_WIFI_SENSOR_1, "WiFi_Data",    TAG_TYPE_FLOAT32, false);
 }
 
 void gateway_start(void) {
     ESP_LOGI(TAG, "Starting Gateway Core Services...");
-    
-    io_manager_init();                                               // 启动本地 IO (PCF8574)
-    xTaskCreate(task_master_poll, "gw_master", 4096, NULL, 5, NULL); // 启动下行 485 采集
-    app_tcp_server_start();                                          // 启动上行 TCP 服务
+    xTaskCreate(task_master_poll, "gw_master", 5120, NULL, 5, NULL); 
+    app_tcp_server_start();                                          
 }
