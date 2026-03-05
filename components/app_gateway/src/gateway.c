@@ -1,113 +1,117 @@
 /**
  * @file gateway.c
- * @brief 应用层：网关引擎核心实现 (融合 RS485、W5100S、Wi-Fi 三大物理层)
+ * @brief 应用层：网关引擎核心实现 (动态组态终极版)
+ * @note 彻底删除了硬编码的 SENSOR_LIST，改为由 config_manager 从 LittleFS 动态拉取加载
  */
 
 #include "gateway.h"
 #include "bsp_uart.h"
 #include "bsp_i2c.h"
 #include "bsp_w5100s.h"
-#include "bsp_wifi.h"       // 引入新加入的 Wi-Fi 驱动
+#include "bsp_wifi.h"
+#include "bsp_fs.h"
 
 #include "register_map.h"
-#include "modbus_master.h"
-#include "modbus_template.h"
-#include "io_manager.h"
+#include "config_manager.h"
 #include "app_tcp_server.h"
-#include "esp_log.h"
-#include "gateway_tags.h"
+#include "app_webserver.h"
+#include "io_manager.h"
 
-#define TAG_ID_ROOM2_STATUS  200
-#define TAG_ID_POWER_VOLTAGE 201
-#define TAG_ID_ROOM3_STATUS  300
-#define TAG_ID_WIFI_SENSOR_1 301
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_log.h"
+#include "gateway_tags.h" // 仅保留本地 IO 等底层固定测点
 
 static const char* TAG = "MAIN_GW";
 
 /* ============================================================
- * 1. 硬件资源静态分配表
+ * 1. 硬件资源静态分配表 (纯底层物理配置)
  * ============================================================ */
-// ... (此处保留原有的 master_port_conf, i2c_conf, w5100s_conf 不变) ...
-static const bsp_rs485_config_t master_port_conf = { .port_num = 1, .tx_io_num = 17, .rx_io_num = 18, .rts_io_num = 19, .baud_rate = 9600 };
-static const bsp_i2c_config_t i2c_conf = { .port_num = 0, .sda_io = 4, .scl_io = 5, .clk_speed = 100000 };
-static const bsp_w5100s_config_t w5100s_conf = { .host_id = SPI2_HOST, .mosi_io = 13, .miso_io = 14, .sclk_io = 15, .cs_io = 16, .rst_io = 47, .clock_speed_mhz = 5 };
+static const bsp_rs485_config_t master_port_conf = {
+    .port_num   = 1,
+    .tx_io_num  = 17,
+    .rx_io_num  = 18,
+    .rts_io_num = 19,
+    .baud_rate  = 9600
+};
 
-// 新增 Wi-Fi 账号密码配置
+static const bsp_i2c_config_t i2c_conf = {
+    .port_num   = 0,
+    .sda_io     = 4,
+    .scl_io     = 5,
+    .clk_speed  = 100000
+};
+
+static const bsp_w5100s_config_t w5100s_conf = {
+    .host_id         = SPI2_HOST,
+    .mosi_io         = 13,
+    .miso_io         = 14,
+    .sclk_io         = 15,
+    .cs_io           = 16,
+    .rst_io          = 47,
+    .clock_speed_mhz = 5
+};
+
 static const bsp_wifi_config_t wifi_conf = {
     .ssid     = "Factory_IOT_Net",
     .password = "Admin12345"
 };
 
 /* ============================================================
- * 2. 业务映射规则 (复用通用解析引擎)
+ * 2. 动态轮询任务核心
  * ============================================================ */
-static modbus_mapping_rule_t room1_rules[] = { { .target_tag_id = TAG_ID_ROOM1_TEMP, .byte_offset = 0, .type = MB_TYPE_INT16_AB, .scale = 0.1f } };
-static const sensor_profile_t room1_profile = { .rule_count = 1, .mapping_rules = room1_rules };
-static void parser_room1_wrapper(const uint8_t *rx_buf, uint16_t len, uint16_t base_tag_id) {
-    if (len >= 5) modbus_universal_parser(&rx_buf[3], rx_buf[2], &room1_profile);
-}
-
-// 给厂区 Wi-Fi 传感器加个规则
-static modbus_mapping_rule_t wifi_sensor_rules[] = { { .target_tag_id = TAG_ID_WIFI_SENSOR_1, .byte_offset = 0, .type = MB_TYPE_UINT16_AB, .scale = 1.0f } };
-static const sensor_profile_t wifi_sensor_profile = { .rule_count = 1, .mapping_rules = wifi_sensor_rules };
-static void parser_wifi_wrapper(const uint8_t *rx_buf, uint16_t len, uint16_t base_tag_id) {
-    if (len >= 5) modbus_universal_parser(&rx_buf[3], rx_buf[2], &wifi_sensor_profile);
-}
-
-/* ============================================================
- * 3. 三模态传感器组态列表！
- * ============================================================ */
-static const sensor_device_t SENSOR_LIST[] = {
-    {
-        .name          = "Node1_RS485",
-        .transport     = MB_TRANSPORT_RTU,      // 物理层：RS485 串口
-        .slave_id      = 1, .func_code = 0x03, .start_reg = 0x00, .reg_count = 1,
-        .status_tag_id = TAG_ID_ROOM1_STATUS, .parse_func = parser_room1_wrapper
-    },
-    {
-        .name          = "Node2_W5100S",
-        .transport     = MB_TRANSPORT_TCP_W5100S, // 物理层：W5100S SPI 硬以太网
-        .target_ip     = {192, 168, 1, 100}, .target_port = 502,
-        .slave_id      = 1, .func_code = 0x03, .start_reg = 0x0100, .reg_count = 2,
-        .status_tag_id = TAG_ID_ROOM2_STATUS, .parse_func = parser_room1_wrapper 
-    },
-    {
-        .name          = "Node3_WiFi",
-        .transport     = MB_TRANSPORT_TCP_WIFI,   // 物理层：ESP32 Wi-Fi 软以太网
-        .target_ip     = {192, 168, 0, 50},  .target_port = 502,
-        .slave_id      = 1, .func_code = 0x03, .start_reg = 0x00, .reg_count = 1,
-        .status_tag_id = TAG_ID_ROOM3_STATUS, .parse_func = parser_wifi_wrapper
-    }
-};
-#define SENSOR_COUNT (sizeof(SENSOR_LIST)/sizeof(sensor_device_t))
+static sensor_device_t *g_dynamic_sensors = NULL;
+static int g_dynamic_sensor_count = 0;
 
 static void task_master_poll(void *arg) {
     modbus_master_init(master_port_conf.port_num);
     while (1) {
-        modbus_master_poll_cycle(SENSOR_LIST, SENSOR_COUNT);
+        // 只要配置池里有东西，就喂给多模态轮询引擎
+        if (g_dynamic_sensor_count > 0 && g_dynamic_sensors != NULL) {
+            modbus_master_poll_cycle(g_dynamic_sensors, g_dynamic_sensor_count);
+        } else {
+            ESP_LOGW(TAG, "No sensors configured. Waiting for JSON push via WebUI...");
+        }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
+/* ============================================================
+ * 3. 网关生命周期控制接口
+ * ============================================================ */
 void gateway_init(void) {
+    // 1. 挂载文件系统 (最高优先级)
+    bsp_fs_init();
+
+    // 2. 初始化底层硬件总线与协议栈
     bsp_rs485_init(&master_port_conf);
     bsp_i2c_init(&i2c_conf);
-    
-    // 启动 LwIP 软协议栈及 Wi-Fi
     bsp_wifi_init(&wifi_conf);
-    
-    // 启动 W5100S 硬协议栈
     bsp_w5100s_init(&w5100s_conf);
     
+    // 3. 初始化实时数据库
     reg_map_init();
-    reg_map_add_tag(TAG_ID_ROOM1_TEMP,    "Room_Temp",    TAG_TYPE_FLOAT32, false);
-    reg_map_add_tag(TAG_ID_ROOM1_STATUS,  "Room1_Status", TAG_TYPE_BOOL,    false);
-    reg_map_add_tag(TAG_ID_ROOM3_STATUS,  "Room3_Status", TAG_TYPE_BOOL,    false);
-    reg_map_add_tag(TAG_ID_WIFI_SENSOR_1, "WiFi_Data",    TAG_TYPE_FLOAT32, false);
+    
+    // 4. 注册网关自身固定的逻辑点 (如本地 IO)
+    reg_map_add_tag(TAG_ID_LOCAL_RELAY_1, "PCF_Relay1", TAG_TYPE_BOOL, true);
+    reg_map_add_tag(TAG_ID_LOCAL_RELAY_2, "PCF_Relay2", TAG_TYPE_BOOL, true);
+
+    // 5. 组态灵魂：从 config.json 动态加载配置表，并向 RTDB 自动注册所有传感器测点！
+    config_manager_load(&g_dynamic_sensors, &g_dynamic_sensor_count);
 }
 
 void gateway_start(void) {
     ESP_LOGI(TAG, "Starting Gateway Core Services...");
-    xTaskCreate(task_master_poll, "gw_master", 5120, NULL, 5, NULL); 
+    
+    // 启动本地 IO 管理 (PCF8574)
+    io_manager_init();                                               
+    
+    // 启动数据泵 (加大堆栈以应对 JSON 解析与多模态网络任务)
+    xTaskCreate(task_master_poll, "gw_master", 6144, NULL, 5, NULL); 
+    
+    // 启动局域网 TCP 组态通讯服务端 (W5100S 承载)
     app_tcp_server_start();                                          
+
+    // 启动 HTTP WebServer API 服务 (供前端下发 JSON 配置使用)
+    app_webserver_start();
 }

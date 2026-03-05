@@ -1,7 +1,15 @@
-# ESP-IDF Partition Table
-# Name, Type, SubType, Offset, Size, Flags
-nvs,data,nvs,0x9000,0x6000,
-phy_init,data,phy,0xf000,0x1000,
-factory,app,factory,0x10000,0x1f0000,
-vfs,data,fat,0x200000,0xA00000,
-storage,data,spiffs,0xc00000,0x400000, 
+# ESP-IDF 16MB Partition Table (OTA + LittleFS)
+# Name,   Type, SubType, Offset,  Size, Flags
+# 1. Core Data
+nvs,      data, nvs,     ,        24K,
+phy_init, data, phy,     ,        4K,
+
+# 2. OTA Data
+otadata,  data, ota,     ,        8K,
+
+# 3. Dual App Partitions
+ota_0,    app,  ota_0,   ,        4M,
+ota_1,    app,  ota_1,   ,        4M,
+
+# 4. LittleFS Storage
+storage,  data, spiffs,  ,        6M,
