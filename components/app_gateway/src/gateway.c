@@ -53,8 +53,8 @@ static const bsp_w5100s_config_t w5100s_conf = {
 };
 
 static const bsp_wifi_config_t wifi_conf = {
-    .ssid     = "Factory_IOT_Net",
-    .password = "Admin12345"
+    .ssid     = "DD_GATEWAY1",
+    .password = "ddzn1811"
 };
 
 /* ============================================================
