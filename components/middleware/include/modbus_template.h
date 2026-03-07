@@ -32,6 +32,7 @@ typedef enum {
  * @note 相当于上位机 Excel 表格中的“一行”配置
  */
 typedef struct {
+    char name[32];          ///< 测点名称，供 MQTT 拼装 JSON 键值对使用
     uint16_t target_tag_id; ///< 解析后要存入的 RTDB 逻辑 ID
     uint16_t byte_offset;   ///< 在原始 Payload 中的字节偏移量 (例如: 从第 4 字节开始取)
     uint8_t  bit_offset;    ///< 位偏移量 0~15 (仅当类型为 MB_TYPE_BOOL 时有效)
@@ -43,18 +44,10 @@ typedef struct {
  * @brief 动态传感器设备画像 (Device Profile)
  * @note 替代原有的固定结构体，内部持有动态分配的规则表
  */
-typedef struct sensor_profile {
-    char name[32];          ///< 设备名称
+typedef struct {
     uint8_t slave_id;       ///< 从站 ID
-    uint8_t func_code;      ///< 批量读取的功能码 (如 0x03)
-    uint16_t start_reg;     ///< 批量读取的起始地址 (如 0x0000)
-    uint16_t reg_count;     ///< 批量读取的寄存器总数 (如读取 100 个，共 200 字节)
-    uint16_t status_tag_id; ///< 设备的在线状态标签 ID (掉线写0，在线写1)
-    
-    uint16_t rule_count;                  ///< 这个传感器包含了多少个映射测点
     modbus_mapping_rule_t *mapping_rules; ///< 动态数组指针：存放所有测点的抽取规则
-    
-    struct sensor_profile *next;          ///< 链表指针：用于管理多个传感器
+    int rule_count;         ///< 这个传感器包含了多少个映射测点
 } sensor_profile_t;
 
 /**

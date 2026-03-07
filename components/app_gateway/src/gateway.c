@@ -13,9 +13,14 @@
 
 #include "register_map.h"
 #include "config_manager.h"
+#include "protocol_engine.h"  // 架构演进：引入全新泛化调度引擎
 #include "app_tcp_server.h"
 #include "app_webserver.h"
 #include "io_manager.h"
+
+// V2.0 引入云端通讯与校时组件
+#include "app_sntp.h"
+#include "app_mqtt.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -64,15 +69,17 @@ static sensor_device_t *g_dynamic_sensors = NULL;
 static int g_dynamic_sensor_count = 0;
 
 static void task_master_poll(void *arg) {
-    modbus_master_init(master_port_conf.port_num);
+    // 调用新引擎初始化
+    protocol_engine_init(master_port_conf.port_num);
+    
     while (1) {
-        // 只要配置池里有东西，就喂给多模态轮询引擎
+        // 将动态组态配置丢给泛化引擎处理
         if (g_dynamic_sensor_count > 0 && g_dynamic_sensors != NULL) {
-            modbus_master_poll_cycle(g_dynamic_sensors, g_dynamic_sensor_count);
+            protocol_engine_poll_cycle(g_dynamic_sensors, g_dynamic_sensor_count);
         } else {
             ESP_LOGW(TAG, "No sensors configured. Waiting for JSON push via WebUI...");
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(500)); // 缩短大循环死区，交给引擎内部进行精确毫秒调度
     }
 }
 
@@ -103,15 +110,22 @@ void gateway_init(void) {
 void gateway_start(void) {
     ESP_LOGI(TAG, "Starting Gateway Core Services...");
     
-    // 启动本地 IO 管理 (PCF8574)
     io_manager_init();                                               
-    
-    // 启动数据泵 (加大堆栈以应对 JSON 解析与多模态网络任务)
     xTaskCreate(task_master_poll, "gw_master", 6144, NULL, 5, NULL); 
-    
-    // 启动局域网 TCP 组态通讯服务端 (W5100S 承载)
     app_tcp_server_start();                                          
 
-    // 启动 HTTP WebServer API 服务 (供前端下发 JSON 配置使用)
+    // =========================================================
+    // 架构优化：无条件启动高层业务组件
+    // ESP-IDF 的 HTTPD、SNTP 和 MQTT 客户端内部自带状态机守护
+    // 即便当前没有 IP，它们也会自动在后台静默等待或尝试重连，不应被强制阻塞
+    // =========================================================
+    
+    // 启动 80 端口 Web 可视化组态后台
     app_webserver_start();
+    
+    // 启动 NTP 网络自动校时 (无网时将返回 1970 纪元，可后期引入 Web 或 MQTT 离线校时)
+    app_sntp_init();
+    
+    // 启动 MQTT 客户端与异步发送队列
+    app_mqtt_start(g_dynamic_sensors, g_dynamic_sensor_count);
 }

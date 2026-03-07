@@ -57,3 +57,5 @@ dkms.conf
 描述
 
 build
+*.old
+*.lock
