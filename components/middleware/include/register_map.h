@@ -98,6 +98,13 @@ bool reg_map_update_quality(uint16_t id, tag_quality_t quality);
  */
 bool reg_map_get_value(uint16_t id, float* out_val, tag_quality_t* out_quality);
 
+/**
+ * @brief 从实时数据库读取最新值 (供 MQTT 全量上报与 Web 监控使用)
+ * @param tag_id 点位 ID
+ * @return 测点的当前值
+ */
+float reg_map_read_value(uint16_t tag_id);
+
 #ifdef __cplusplus
 }
 #endif

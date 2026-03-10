@@ -1,11 +1,11 @@
 /**
  * @file protocol_engine.h
- * @brief 中间件层：泛化协议调度引擎 (替代原 modbus_master)
- * @note 支持 Modbus RTU/TCP 以及自定义非标协议(主从轮询 & 主动上报)
+ * @brief 中间件层：泛化协议调度引擎 
+ * @note 仅依赖基础数据模板，解除与应用层的循环依赖
  */
 #pragma once
 #include <stdint.h>
-#include "config_manager.h" // 依赖 V2.0 的 config_manager.h
+#include "modbus_template.h" 
 
 #ifdef __cplusplus
 extern "C" {

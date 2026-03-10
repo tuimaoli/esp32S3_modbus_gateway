@@ -104,3 +104,9 @@ bool reg_map_get_value(uint16_t id, float* out_val, tag_quality_t* out_quality) 
     xSemaphoreGive(g_reg_mutex);
     return found;
 }
+
+float reg_map_read_value(uint16_t tag_id) {
+    float val = 0.0f;
+
+    return val;
+}
