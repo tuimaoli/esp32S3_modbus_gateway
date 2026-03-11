@@ -1,7 +1,7 @@
 /**
  * @file app_webserver.c
  * @brief 应用层：RESTful API 与 Captive Portal 可视化融合前端
- * @note 内置无弹窗极简 UI 框架，整合 JSON 组态与 Wi-Fi 配网功能
+ * @note V3.0 新增本地 Web OTA 固件升级引擎 (支持 Ping-Pong 双分区与防滚回保护)
  */
 #include "app_webserver.h"
 #include "config_manager.h"
@@ -9,15 +9,20 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "app_ota.h"       // 架构修正：引入解耦后的应用层 OTA 管理器
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#include <sys/param.h>
 
 static const char *TAG = "WEB_API";
 
+// 引用底层的 Smart Handoff 测试接口
+extern bool bsp_wifi_try_connect_and_get_ip(const char* ssid, const char* pass, char* out_ip, uint32_t timeout_ms);
+
 /* ============================================================
- * 融合前端 HTML (无 alert，精美原生双 Tab 设计)
+ * 融合前端 HTML (新增 OTA 升级标签页与进度条逻辑)
  * ============================================================ */
 static const char* INDEX_HTML = 
 "<!DOCTYPE html>\n"
@@ -27,106 +32,139 @@ static const char* INDEX_HTML =
 "  <title>IoT Edge Gateway 控制台</title>\n"
 "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
 "  <style>\n"
-"    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f3f4f6; padding: 20px; margin: 0; }\n"
+"    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background-color: #f3f4f6; padding: 20px; margin: 0; }\n"
 "    .container { max-width: 800px; margin: 0 auto; background: #fff; padding: 24px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }\n"
-"    .tabs { display: flex; border-bottom: 2px solid #e5e7eb; margin-bottom: 20px; }\n"
-"    .tab { padding: 12px 24px; cursor: pointer; color: #6b7280; font-weight: 600; transition: 0.2s; border-bottom: 2px solid transparent; margin-bottom: -2px; }\n"
-"    .tab:hover { color: #374151; }\n"
+"    .tabs { display: flex; border-bottom: 2px solid #e5e7eb; margin-bottom: 20px; overflow-x: auto; }\n"
+"    .tab { padding: 12px 24px; cursor: pointer; color: #6b7280; font-weight: 600; transition: 0.2s; border-bottom: 2px solid transparent; margin-bottom: -2px; white-space: nowrap; }\n"
 "    .tab.active { color: #2563eb; border-bottom: 2px solid #2563eb; }\n"
 "    .content { display: none; }\n"
 "    .content.active { display: block; }\n"
 "    textarea, input { width: 100%; font-family: monospace; font-size: 14px; padding: 12px; border: 1px solid #d1d5db; border-radius: 6px; box-sizing: border-box; margin-bottom: 16px; }\n"
-"    button { background-color: #2563eb; color: white; padding: 12px; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; width: 100%; transition: 0.2s; }\n"
-"    button:hover { background-color: #1d4ed8; }\n"
+"    button { background-color: #2563eb; color: white; padding: 12px; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; width: 100%; }\n"
+"    button:disabled { background-color: #9ca3af; cursor: not-allowed; }\n"
 "    #toast { display: none; padding: 12px; border-radius: 6px; margin-bottom: 16px; font-weight: bold; text-align: center; }\n"
+"    a { color: #2563eb; text-decoration: underline; }\n"
+"    .progress-bar { width: 100%; background-color: #e5e7eb; border-radius: 6px; overflow: hidden; display: none; margin-bottom: 16px; }\n"
+"    .progress-fill { height: 12px; background-color: #059669; width: 0%; transition: width 0.2s; }\n"
 "  </style>\n"
 "</head>\n"
 "<body>\n"
 "  <div class=\"container\">\n"
-"    <h2 style=\"color: #111827; margin-top:0;\">边缘网关配置台</h2>\n"
+"    <h2 style=\"margin-top:0;\">边缘网关配置台</h2>\n"
 "    <div id=\"toast\"></div>\n"
-"    \n"
 "    <div class=\"tabs\">\n"
-"      <div class=\"tab active\" onclick=\"switchTab('json')\" id=\"tab-btn-json\">业务组态 (JSON)</div>\n"
-"      <div class=\"tab\" onclick=\"switchTab('wifi')\" id=\"tab-btn-wifi\">厂区网络配网</div>\n"
+"      <div class=\"tab active\" onclick=\"switchTab('json')\" id=\"tab-btn-json\">业务组态</div>\n"
+"      <div class=\"tab\" onclick=\"switchTab('wifi')\" id=\"tab-btn-wifi\">网络移交</div>\n"
+"      <div class=\"tab\" onclick=\"switchTab('ota')\" id=\"tab-btn-ota\">系统升级(OTA)</div>\n"
 "    </div>\n"
-"\n"
-"    <!-- 选项卡 1：业务组态 -->\n"
+"    \n"
+"    <!-- 1. 业务组态 -->\n"
 "    <div id=\"tab-json\" class=\"content active\">\n"
-"      <p style=\"color: #6b7280; font-size: 14px;\">支持标准 Modbus 及非标指令配置映射，系统自带容错校验。</p>\n"
 "      <textarea id=\"cfg\" style=\"height: 380px;\"></textarea>\n"
-"      <button onclick=\"saveJson()\" id=\"btn-json\">校验并下发组态 (重启生效)</button>\n"
+"      <button onclick=\"saveJson()\" id=\"btn-json\">校验并下发组态</button>\n"
 "    </div>\n"
-"\n"
-"    <!-- 选项卡 2：Wi-Fi 配网 -->\n"
+"    \n"
+"    <!-- 2. 网络配网 -->\n"
 "    <div id=\"tab-wifi\" class=\"content\">\n"
-"      <p style=\"color: #6b7280; font-size: 14px;\">网关已开启临时管理热点，请在此填入厂区路由器信息。</p>\n"
-"      <label style=\"font-weight: bold; font-size: 14px; color: #374151;\">Wi-Fi 名称 (SSID)</label>\n"
-"      <input type=\"text\" id=\"wifi_ssid\" placeholder=\"输入厂区 Wi-Fi 名称\">\n"
-"      <label style=\"font-weight: bold; font-size: 14px; color: #374151;\">Wi-Fi 密码</label>\n"
+"      <label>Wi-Fi 名称 (SSID)</label>\n"
+"      <input type=\"text\" id=\"wifi_ssid\" placeholder=\"输入厂区 Wi-Fi\">\n"
+"      <label>Wi-Fi 密码</label>\n"
 "      <input type=\"password\" id=\"wifi_pass\" placeholder=\"输入密码\">\n"
-"      <button onclick=\"saveWifi()\" id=\"btn-wifi\" style=\"background-color: #059669;\">保存并移交网络 (连接厂区)</button>\n"
+"      <button onclick=\"saveWifi()\" id=\"btn-wifi\" style=\"background-color: #059669;\">保存并获取 IP</button>\n"
+"    </div>\n"
+"    \n"
+"    <!-- 3. OTA 升级 -->\n"
+"    <div id=\"tab-ota\" class=\"content\">\n"
+"      <p style=\"color: #6b7280; font-size: 14px;\">请选择最新的 `.bin` 固件文件。升级过程中请勿断开电源。</p>\n"
+"      <input type=\"file\" id=\"ota_file\" accept=\".bin\" style=\"padding: 8px 0;\">\n"
+"      <div class=\"progress-bar\" id=\"ota_progress_bg\"><div class=\"progress-fill\" id=\"ota_progress\"></div></div>\n"
+"      <button onclick=\"startOTA()\" id=\"btn-ota\" style=\"background-color: #dc2626;\">开始刷写固件</button>\n"
 "    </div>\n"
 "  </div>\n"
-"\n"
+"  \n"
 "  <script>\n"
 "    function showMsg(msg, isError) {\n"
 "      let t = document.getElementById('toast');\n"
-"      t.style.display = 'block';\n"
+"      t.style.display = 'block'; t.innerHTML = msg;\n"
 "      t.style.backgroundColor = isError ? '#fee2e2' : '#d1fae5';\n"
 "      t.style.color = isError ? '#b91c1c' : '#047857';\n"
-"      t.innerText = msg;\n"
 "    }\n"
-"\n"
-"    function switchTab(target) {\n"
-"      document.querySelectorAll('.content').forEach(el => el.classList.remove('active'));\n"
-"      document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));\n"
-"      document.getElementById('tab-' + target).classList.add('active');\n"
-"      document.getElementById('tab-btn-' + target).classList.add('active');\n"
+"    function switchTab(t) {\n"
+"      document.querySelectorAll('.content, .tab').forEach(el => el.classList.remove('active'));\n"
+"      document.getElementById('tab-' + t).classList.add('active');\n"
+"      document.getElementById('tab-btn-' + t).classList.add('active');\n"
 "    }\n"
-"\n"
-"    /* 页面加载拉取当前配置 */\n"
 "    fetch('/api/config').then(r=>r.text()).then(d=>{ document.getElementById('cfg').value = d; });\n"
 "    \n"
 "    function saveJson(){\n"
-"      let cfgText = document.getElementById('cfg').value;\n"
-"      let parsedJson = null;\n"
-"      try { parsedJson = JSON.parse(cfgText); } catch(e) {\n"
-"        showMsg('❌ JSON 语法错误: ' + e.message, true); return;\n"
-"      }\n"
-"      \n"
-"      let btn = document.getElementById('btn-json');\n"
-"      btn.innerText = '配置下发中...'; btn.disabled = true;\n"
-"      fetch('/api/config',{ method:'POST', body: JSON.stringify(parsedJson, null, 2) })\n"
-"      .then(r=>{ if(r.ok) { showMsg('✅ 组态下发成功！网关正在硬重启...', false); }\n"
-"                 else throw new Error(); })\n"
-"      .catch(e=>{ showMsg('❌ 网络保存失败', true); btn.innerText='重试'; btn.disabled=false; });\n"
+"      let parsed = null; try { parsed = JSON.parse(document.getElementById('cfg').value); } catch(e) { showMsg('❌ JSON 错误', true); return; }\n"
+"      fetch('/api/config',{ method:'POST', body: JSON.stringify(parsed, null, 2) })\n"
+"      .then(r=>{ if(r.ok) showMsg('✅ 下发成功！网关重启中...', false); })\n"
 "    }\n"
-"\n"
+"    \n"
 "    function saveWifi(){\n"
-"      let s = document.getElementById('wifi_ssid').value;\n"
-"      let p = document.getElementById('wifi_pass').value;\n"
-"      if(!s) { showMsg('❌ SSID 不能为空', true); return; }\n"
-"      \n"
+"      let s = document.getElementById('wifi_ssid').value, p = document.getElementById('wifi_pass').value;\n"
+"      if(!s) return;\n"
 "      let btn = document.getElementById('btn-wifi');\n"
-"      btn.innerText = '正在联机，请勿刷新页面...'; btn.disabled = true;\n"
-"      showMsg('🔄 设备正在尝试连接厂区路由，请等待...', false);\n"
+"      btn.innerText = '设备正在联机，请等待 5-15 秒...'; btn.disabled = true;\n"
+"      showMsg('🔄 正在穿透网络获取 IP，请勿关闭页面...', false);\n"
 "      \n"
 "      fetch('/api/wifi',{ method:'POST', body: JSON.stringify({ssid: s, password: p}) })\n"
 "      .then(r=>r.json()).then(data=>{\n"
-"        showMsg('✅ 连接成功！\\n请将手机连回厂区Wi-Fi，通过局域网访问: http://gw-esp32.local', false);\n"
-"        btn.style.display = 'none';\n"
-"      })\n"
-"      .catch(e=>{ showMsg('❌ 设备已重启或网络移交失败', true); });\n"
+"        if(data.status === 'success') {\n"
+"           showMsg('✅ 配网成功！设备新 IP 为: <br><br><a href=\"http://' + data.ip + '\" style=\"font-size:24px;\">http://' + data.ip + '</a>', false);\n"
+"           btn.style.display = 'none';\n"
+"        } else {\n"
+"           showMsg('❌ 连接厂区路由器失败。', true);\n"
+"           btn.innerText = '保存并获取 IP'; btn.disabled = false;\n"
+"        }\n"
+"      }).catch(e=>{ showMsg('❌ 请求断开', true); btn.innerText = '重试'; btn.disabled = false; });\n"
+"    }\n"
+"    \n"
+"    // 原生 XMLHttpRequest 实现带进度的 OTA 文件上传\n"
+"    function startOTA() {\n"
+"      let fileInput = document.getElementById('ota_file');\n"
+"      if (fileInput.files.length === 0) { showMsg('❌ 请先选择 .bin 文件', true); return; }\n"
+"      let file = fileInput.files[0];\n"
+"      \n"
+"      let btn = document.getElementById('btn-ota');\n"
+"      let progBg = document.getElementById('ota_progress_bg');\n"
+"      let progFill = document.getElementById('ota_progress');\n"
+"      btn.disabled = true; btn.innerText = '正在上传固件...';\n"
+"      progBg.style.display = 'block'; progFill.style.width = '0%';\n"
+"      showMsg('⏳ 正在刷写系统底包，过程可能持续 30-60 秒，切勿断电！', false);\n"
+"\n"
+"      let xhr = new XMLHttpRequest();\n"
+"      xhr.upload.addEventListener('progress', function(e) {\n"
+"        if (e.lengthComputable) {\n"
+"          let percent = Math.round((e.loaded / e.total) * 100);\n"
+"          progFill.style.width = percent + '%';\n"
+"          if (percent === 100) btn.innerText = '正在校验并写入 Flash...';\n"
+"        }\n"
+"      });\n"
+"      xhr.onreadystatechange = function() {\n"
+"        if (xhr.readyState === 4) {\n"
+"          if (xhr.status === 200) {\n"
+"             showMsg('🎉 升级成功！网关正在硬重启，请等待 10 秒后刷新页面。', false);\n"
+"             btn.innerText = '升级完成';\n"
+"             setTimeout(() => { window.location.reload(); }, 10000);\n"
+"          } else {\n"
+"             showMsg('❌ 升级失败，文件校验错误或网络中断', true);\n"
+"             btn.disabled = false; btn.innerText = '重新尝试';\n"
+"          }\n"
+"        }\n"
+"      };\n"
+"      xhr.open('POST', '/api/ota', true);\n"
+"      xhr.setRequestHeader('Content-Type', 'application/octet-stream');\n"
+"      xhr.send(file);\n"
 "    }\n"
 "  </script>\n"
 "</body>\n"
 "</html>\n";
 
 /* ============================================================
- * HTTP 路由拦截处理
+ * 原有 HTTP 路由处理模块
  * ============================================================ */
-
 static esp_err_t index_html_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr(req, INDEX_HTML);
@@ -164,7 +202,6 @@ static esp_err_t api_post_config_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// 接收前端配置并存入 VFS 文件系统持久化
 static esp_err_t api_post_wifi_handler(httpd_req_t *req) {
     char *buf = malloc(req->content_len + 1);
     if (!buf) return HTTPD_SOCK_ERR_FAIL;
@@ -174,17 +211,26 @@ static esp_err_t api_post_wifi_handler(httpd_req_t *req) {
 
     cJSON *root = cJSON_Parse(buf);
     if (root) {
+        char *ssid = cJSON_GetObjectItem(root, "ssid")->valuestring;
+        char *pass = cJSON_GetObjectItem(root, "password")->valuestring;
+
         bsp_fs_write_str_to_file("/vfs/wifi.json", buf);
-        cJSON_Delete(root);
+        char new_ip[32] = {0};
+        bool success = bsp_wifi_try_connect_and_get_ip(ssid, pass, new_ip, 15000);
         
-        // 响应客户端成功，提示其准备切换网络
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"status\": \"wifi_saved\"}");
-        free(buf);
+        if (success) {
+            char resp[128];
+            snprintf(resp, sizeof(resp), "{\"status\": \"success\", \"ip\": \"%s\"}", new_ip);
+            httpd_resp_sendstr(req, resp);
+        } else {
+            httpd_resp_sendstr(req, "{\"status\": \"fail\", \"error\": \"Connection Failed\"}");
+        }
         
-        ESP_LOGI(TAG, "New Wi-Fi credentials saved. Restarting to connect...");
-        vTaskDelay(pdMS_TO_TICKS(2000)); // 给前端留出 2 秒展示动画的时间
-        esp_restart(); // 彻底硬重启，交由底层的 bsp_wifi 自动连接新厂区路由
+        cJSON_Delete(root);
+        free(buf);
+        vTaskDelay(pdMS_TO_TICKS(3000)); 
+        esp_restart(); 
     } else {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "{\"error\": \"Bad JSON\"}");
         free(buf);
@@ -192,29 +238,76 @@ static esp_err_t api_post_wifi_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ==========================================================
-// Captive Portal 核心漏洞拦截：
-// 手机由于 DNS 劫持会发起各种乱七八糟的请求（如 /generate_204 等）
-// 我们统一将其拦截为 302 重定向到网关主页
-// ==========================================================
+/* ============================================================
+ * 【重构核心】解耦后的本地 Web OTA 接收引擎
+ * ============================================================ */
+static esp_err_t api_post_ota_handler(httpd_req_t *req) {
+    // 1. 通知 OTA 管理器准备好写入环境
+    if (app_ota_begin() != APP_OTA_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA Begin Failed");
+        return ESP_FAIL;
+    }
+
+    char buf[1024]; 
+    int received = 0;
+    int remaining = req->content_len;
+    
+    // 2. 边收 HTTP 流，边喂给 OTA 管理器
+    while (remaining > 0) {
+        int recv_len = httpd_req_recv(req, buf, MIN(remaining, sizeof(buf)));
+        if (recv_len <= 0) {
+            if (recv_len == HTTPD_SOCK_ERR_TIMEOUT) continue; // 允许超时重试
+            
+            ESP_LOGE(TAG, "HTTP RX Error!");
+            app_ota_abort(); // 中断回滚
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Rx Error");
+            return ESP_FAIL;
+        }
+        
+        // 交给下层刷入 Flash
+        if (app_ota_write_chunk(buf, recv_len) != APP_OTA_OK) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Flash Write Error");
+            return ESP_FAIL;
+        }
+        
+        remaining -= recv_len;
+        received += recv_len;
+        vTaskDelay(pdMS_TO_TICKS(1)); // 喂狗防阻塞
+    }
+
+    // 3. 接收完毕，通知管理器进行校验并切换启动分区
+    if (app_ota_end() != APP_OTA_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA Validation Failed");
+        return ESP_FAIL;
+    }
+    
+    // 4. 响应前端成功，优雅重启
+    httpd_resp_sendstr(req, "{\"status\": \"success\"}");
+    
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+    
+    return ESP_OK;
+}
+
 static esp_err_t captive_portal_redirect_handler(httpd_req_t *req, httpd_err_code_t err) {
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/"); // 引导手机跳转到根目录
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/"); 
     httpd_resp_send(req, NULL, 0);
     return ESP_OK;
 }
 
 /* ============================================================
- * 启动服务
+ * 启动 Web 服务
  * ============================================================ */
 void app_webserver_start(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 10;
-    // 新增：LRU 淘汰机制。极大地增强 Captive Portal 应对手机并发轰炸的稳定性
     config.lru_purge_enable = true;
+    
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) == ESP_OK) {
-        httpd_uri_t uri_root = { .uri = "/", .method = HTTP_GET, .handler = index_html_handler, .user_ctx = NULL };
+        httpd_uri_t uri_root = { .uri = "/", .method = HTTP_GET, .handler = index_html_handler };
         httpd_register_uri_handler(server, &uri_root);
 
         httpd_uri_t uri_get_config = { .uri = "/api/config", .method = HTTP_GET, .handler = api_get_config_handler };
@@ -226,11 +319,12 @@ void app_webserver_start(void) {
         httpd_uri_t uri_post_wifi = { .uri = "/api/wifi", .method = HTTP_POST, .handler = api_post_wifi_handler };
         httpd_register_uri_handler(server, &uri_post_wifi);
         
-        // 挂载全局错误拦截钩子，构建极其霸道的 Captive Portal 强制重定向
+        // 【新增路由】：注册 OTA 二进制流接收接口
+        httpd_uri_t uri_post_ota = { .uri = "/api/ota", .method = HTTP_POST, .handler = api_post_ota_handler };
+        httpd_register_uri_handler(server, &uri_post_ota);
+        
         httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, captive_portal_redirect_handler);
         
         ESP_LOGI(TAG, "Unified Config Portal started on port 80");
-    } else {
-        ESP_LOGE(TAG, "Failed to start Webserver!");
     }
 }

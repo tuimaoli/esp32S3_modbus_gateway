@@ -1,18 +1,18 @@
 /**
  * @file app_mqtt.c
- * @brief MQTT 高级业务实现 (修复版：解决传输层注册报错问题)
+ * @brief MQTT 高级业务实现 (融合云端远程 OTA 与指令反解析)
  */
 #include "app_mqtt.h"
 #include "app_sntp.h"
 #include "register_map.h"
 #include "mqtt_client.h"
+#include "esp_http_client.h"
+#include "app_ota.h"         
 #include "esp_log.h"
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-
-// #include "transport_wiznet.h" // 暂时隐蔽自定义硬件传输层
 
 static const char __attribute__((unused)) *TAG = "APP_MQTT";
 static esp_mqtt_client_handle_t g_mqtt_client = NULL;
@@ -35,21 +35,107 @@ void app_mqtt_enqueue_data(const char *sensor_name, const char *metric_name, flo
     xQueueSend(g_mqtt_tx_queue, &msg, 0); 
 }
 
+/* ============================================================
+ * 异步拉取任务：云端触发的 HTTP 固件下载
+ * ============================================================ */
+static void mqtt_ota_download_task(void *arg) {
+    char *url = (char *)arg;
+    ESP_LOGW(TAG, "Starting Cloud-triggered OTA from: %s", url);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .timeout_ms = 15000,
+        .keep_alive_enable = true,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    
+    if (esp_http_client_open(client, 0) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open HTTP connection to OTA server");
+        goto ota_cleanup;
+    }
+
+    esp_http_client_fetch_headers(client);
+    
+    // 复用应用层封装好的 OTA 漏斗引擎
+    if (app_ota_begin() != APP_OTA_OK) {
+        goto ota_cleanup;
+    }
+
+    char buf[1024];
+    int read_len;
+    // 边下边写
+    while ((read_len = esp_http_client_read(client, buf, sizeof(buf))) > 0) {
+        if (app_ota_write_chunk(buf, read_len) != APP_OTA_OK) {
+            ESP_LOGE(TAG, "OTA chunk write failed during download");
+            goto ota_cleanup;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1)); // 喂狗
+    }
+
+    // 校验 MD5 切换分区并重启
+    if (app_ota_end() == APP_OTA_OK) {
+        ESP_LOGI(TAG, "Cloud OTA Download complete! System Rebooting...");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+    }
+
+ota_cleanup:
+    app_ota_abort(); // 出错回滚
+    esp_http_client_cleanup(client);
+    free(url);
+    vTaskDelete(NULL);
+}
+
+/* ============================================================
+ * 核心：MQTT 事件与云端指令反解析
+ * ============================================================ */
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data) {
     esp_mqtt_event_handle_t event = event_data;
     const gateway_config_t *gw_cfg = config_manager_get_gw_cfg();
 
     if (event_id == MQTT_EVENT_CONNECTED) {
-        ESP_LOGI(TAG, "MQTT Connected! Auto-subscribing to configured topics...");
+        ESP_LOGI(TAG, "MQTT Connected! Auto-subscribing...");
         for(int i = 0; i < gw_cfg->sub_topic_count; i++) {
             if (strlen(gw_cfg->mqtt_sub_topics[i]) > 1) {
                 esp_mqtt_client_subscribe(g_mqtt_client, gw_cfg->mqtt_sub_topics[i], 0);
             }
         }
-    } else if (event_id == MQTT_EVENT_DISCONNECTED) {
-        ESP_LOGW(TAG, "MQTT Disconnected. Waiting for auto-reconnect...");
     } else if (event_id == MQTT_EVENT_DATA) {
         ESP_LOGI(TAG, "MQTT RX: Topic=%.*s", event->topic_len, event->topic);
+        
+        // 动态分配内存拷贝 payload，转成以 null 结尾的 C 字符串，供 cJSON 解析
+        char *json_data = malloc(event->data_len + 1);
+        if (json_data) {
+            memcpy(json_data, event->data, event->data_len);
+            json_data[event->data_len] = '\0';
+            
+            cJSON *root = cJSON_Parse(json_data);
+            if (root) {
+                cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
+                if (cmd && cmd->valuestring) {
+                    // 指令 1：写本地变量 (例: {"cmd": "write_tag", "target_tag_id": 501, "value": 1.0})
+                    if (strcmp(cmd->valuestring, "write_tag") == 0) {
+                        cJSON *tag_id = cJSON_GetObjectItem(root, "target_tag_id");
+                        cJSON *val = cJSON_GetObjectItem(root, "value");
+                        if (tag_id && val) {
+                            reg_map_update_value((uint16_t)tag_id->valueint, (float)val->valuedouble);
+                            ESP_LOGI(TAG, "Cloud CMD: Write Tag %d = %.2f", tag_id->valueint, val->valuedouble);
+                        }
+                    } 
+                    // 指令 2：远程云端 OTA (例: {"cmd": "ota", "url": "http://192.168.1.100/fw.bin"})
+                    else if (strcmp(cmd->valuestring, "ota") == 0) {
+                        cJSON *url = cJSON_GetObjectItem(root, "url");
+                        if (url && url->valuestring) {
+                            char *dl_url = strdup(url->valuestring);
+                            // 开启独立的后台下载线程，绝不阻塞 MQTT 心跳！
+                            xTaskCreate(mqtt_ota_download_task, "mqtt_ota", 8192, dl_url, 5, NULL);
+                        }
+                    }
+                }
+                cJSON_Delete(root);
+            }
+            free(json_data);
+        }
     }
 }
 
@@ -145,17 +231,6 @@ void app_mqtt_start(const sensor_device_t *sensors, int sensor_count) {
 
     g_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
     
-    /* * [架构注释] 
-     * 由于 ESP-IDF v4/v5 官方 MQTT 客户端屏蔽了动态注入外部 Transport 的接口，
-     * 此处隐蔽原有的 esp_transport_wiznet_init 逻辑。
-     * 当前系统将自动通过 LwIP (Wi-Fi 软栈) 进行 MQTT 数据上报。
-     * 若后期强需求走 W5100S 硬件栈上报 MQTT，建议引入独立的 coreMQTT 或 Paho-MQTT 纯 C 库。
-     */
-    // esp_transport_handle_t wiz_transport = esp_transport_wiznet_init();
-    // if (wiz_transport) {
-    //     esp_mqtt_client_register_transport(g_mqtt_client, "wizmqtt", wiz_transport);
-    // }
-
     esp_mqtt_client_register_event(g_mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(g_mqtt_client);
 

@@ -6,6 +6,7 @@ idf_component_register(
           "src/app_webserver.c"
           "src/app_mqtt.c"
           "src/app_sntp.c"
+          "src/app_ota.c"
      INCLUDE_DIRS "include"
-     REQUIRES middleware bsp json esp_http_server mqtt
+     REQUIRES middleware bsp json esp_http_server mqtt app_update
 )
