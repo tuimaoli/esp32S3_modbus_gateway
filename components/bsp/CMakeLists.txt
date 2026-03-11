@@ -8,7 +8,7 @@ idf_component_register(SRCS "src/bsp_uart.c"
                             "src/bsp_wifi.c"
                             "src/bsp_fs.c"
                        INCLUDE_DIRS "include" "src" "src/Ethernet" "src/Ethernet/W5100" 
-                       REQUIRES driver esp_wifi esp_netif esp_event littlefs esp_http_client)
+                       REQUIRES driver esp_wifi esp_netif esp_event littlefs esp_http_client json lwip mdns)
 
 # 强制定义 WIZnet 库需要的芯片宏，消除头文件引用错误
 target_compile_definitions(${COMPONENT_LIB} PUBLIC _WIZCHIP_=5100)

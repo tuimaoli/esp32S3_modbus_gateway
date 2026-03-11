@@ -28,3 +28,14 @@ esp_err_t bsp_wifi_init(const bsp_wifi_config_t *config);
  * @return true: 已连接且有 IP; false: 未连接或正在分配
  */
 bool bsp_wifi_is_connected(void);
+
+/**
+ * @brief 查询当前是否处于 SoftAP 配网救生模式
+ */
+bool bsp_wifi_is_ap_mode(void);
+
+/**
+ * @brief 注入设备唯一标识符 (用于统一 SoftAP 的 SSID 名称)
+ * @param device_id 设备 ID 字符串
+ */
+void bsp_wifi_set_device_id(const char* device_id);
