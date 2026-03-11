@@ -1,13 +1,12 @@
 /**
  * @file protocol_engine.c
  * @brief 中间件层：泛化协议引擎 (SDH 软件定义硬件核心)
- * @note 彻底解决粘包/半包问题，支持切片规则映射与 MQTT 异步入队
+ * @note 修复了架构依赖倒置问题，采用函数指针 Callback 将数据抛出给 App 层
  */
 #include "protocol_engine.h"
 #include "bsp_uart.h"
 #include "register_map.h"
 #include "modbus_utils.h"
-#include "app_mqtt.h"      // 引入 MQTT 发送队列
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -18,7 +17,7 @@
 #endif
 #include "Ethernet/wizchip_conf.h"
 
-static const char *TAG = "PROTO_ENG";
+static const char __attribute__((unused)) *TAG = "PROTO_ENG";
 static int g_master_port = -1;
 
 #define SOCK_W5100S_CLIENT 1    // W5100S 协议引擎专用 Socket
@@ -26,6 +25,13 @@ static int g_master_port = -1;
 // 每个链路的物理滑动接收窗 (应对粘包半包)
 static uint8_t g_rs485_rx_ring[1024];
 static int g_rs485_rx_len = 0;
+
+// 上层注册的异步抛出回调钩子
+static protocol_data_cb_t g_data_cb = NULL;
+
+void protocol_engine_register_data_cb(protocol_data_cb_t cb) {
+    g_data_cb = cb;
+}
 
 void protocol_engine_init(int uart_port) { 
     g_master_port = uart_port; 
@@ -40,7 +46,9 @@ static void execute_slice_mapping(const sensor_device_t *dev, const uint8_t *fra
         const modbus_mapping_rule_t *rule = &dev->rules[i];
         
         // 越界防呆
-        if (rule->byte_offset + 2 > frame_len) continue;
+        if (rule->byte_offset + 2 > frame_len) {
+            continue;
+        }
 
         const uint8_t *p = &frame[rule->byte_offset];
         float final_val = 0.0f;
@@ -48,9 +56,14 @@ static void execute_slice_mapping(const sensor_device_t *dev, const uint8_t *fra
         // 多态数据类型萃取 (大端/小端/浮点转换)
         switch (rule->type) {
             case MB_TYPE_UINT16_AB:
-                final_val = (float)((p[0] << 8) | p[1]); break;
-            case MB_TYPE_UINT16_BA:
-                final_val = (float)((p[1] << 8) | p[0]); break;
+                final_val = (float)((p[0] << 8) | p[1]); 
+                break;
+            case MB_TYPE_INT16_AB:
+                final_val = (float)((int16_t)((p[0] << 8) | p[1])); 
+                break;
+            case MB_TYPE_INT16_BA:
+                final_val = (float)((int16_t)((p[1] << 8) | p[0])); 
+                break;
             case MB_TYPE_FLOAT32_ABCD:
                 if (rule->byte_offset + 4 <= frame_len) {
                     uint32_t temp = (p[0]<<24) | (p[1]<<16) | (p[2]<<8) | p[3];
@@ -72,8 +85,10 @@ static void execute_slice_mapping(const sensor_device_t *dev, const uint8_t *fra
         // 1. 更新本地 RTDB
         reg_map_update_value(rule->target_tag_id, final_val);
         
-        // 2. ⚡ 极速非阻塞：将切片好的数据压入 MQTT 发送队列
-        app_mqtt_enqueue_data(dev->name, rule->name, final_val);
+        // 2. ⚡ 极速非阻塞：通过钩子将切片好的数据抛给上层 (无需直接依赖 MQTT)
+        if (g_data_cb != NULL) {
+            g_data_cb(dev->name, rule->name, final_val);
+        }
     }
 }
 
@@ -114,7 +129,9 @@ static bool process_custom_sliding_window(const sensor_device_t *dev, uint8_t *b
                 
                 // 将处理完的数据移出缓冲区 (RingBuffer Pop 操作)
                 int remaining = *buf_len - (frame_start + frame_len);
-                if (remaining > 0) memmove(buffer, &buffer[frame_start + frame_len], remaining);
+                if (remaining > 0) {
+                    memmove(buffer, &buffer[frame_start + frame_len], remaining);
+                }
                 *buf_len = remaining;
                 i = 0; // 重新从头扫描剩下的碎片
                 continue;
@@ -147,11 +164,15 @@ void protocol_engine_poll_cycle(const sensor_device_t *sensors, int count) {
             // 如果是一问一答型 (Modbus 或 Custom Poll)，下发 TX
             if (dev->protocol == PROTO_MODBUS_RTU) {
                 uint8_t tx_buf[8];
-                tx_buf[0] = dev->slave_id; tx_buf[1] = dev->func_code;
-                tx_buf[2] = dev->start_reg >> 8; tx_buf[3] = dev->start_reg & 0xFF;
-                tx_buf[4] = dev->reg_count >> 8; tx_buf[5] = dev->reg_count & 0xFF;
+                tx_buf[0] = dev->slave_id; 
+                tx_buf[1] = dev->func_code;
+                tx_buf[2] = dev->start_reg >> 8; 
+                tx_buf[3] = dev->start_reg & 0xFF;
+                tx_buf[4] = dev->reg_count >> 8; 
+                tx_buf[5] = dev->reg_count & 0xFF;
                 uint16_t crc = modbus_crc16(tx_buf, 6);
-                tx_buf[6] = crc & 0xFF; tx_buf[7] = crc >> 8;
+                tx_buf[6] = crc & 0xFF; 
+                tx_buf[7] = crc >> 8;
                 bsp_uart_flush(g_master_port);
                 bsp_uart_send(g_master_port, tx_buf, 8);
             } else if (dev->protocol == PROTO_CUSTOM_POLL && dev->custom.tx_len > 0) {
@@ -189,13 +210,21 @@ void protocol_engine_poll_cycle(const sensor_device_t *sensors, int count) {
         else if (dev->transport == 1 && dev->protocol == PROTO_MODBUS_TCP) {
             uint8_t sr = getSn_SR(SOCK_W5100S_CLIENT);
             if (sr != SOCK_ESTABLISHED) {
-                setSn_CR(SOCK_W5100S_CLIENT, Sn_CR_CLOSE); while(getSn_CR(SOCK_W5100S_CLIENT));
+                setSn_CR(SOCK_W5100S_CLIENT, Sn_CR_CLOSE); 
+                while(getSn_CR(SOCK_W5100S_CLIENT));
+                
+                uint16_t dynamic_port = 50000 + (xTaskGetTickCount() % 10000);
+                
                 setSn_MR(SOCK_W5100S_CLIENT, Sn_MR_TCP);
-                setSn_PORT(SOCK_W5100S_CLIENT, 50000 + (xTaskGetTickCount() % 10000));
-                setSn_CR(SOCK_W5100S_CLIENT, Sn_CR_OPEN); while(getSn_CR(SOCK_W5100S_CLIENT));
+                setSn_PORT(SOCK_W5100S_CLIENT, dynamic_port);
+                setSn_CR(SOCK_W5100S_CLIENT, Sn_CR_OPEN); 
+                while(getSn_CR(SOCK_W5100S_CLIENT));
+                
                 setSn_DIPR(SOCK_W5100S_CLIENT, (uint8_t*)dev->target_ip);
                 setSn_DPORT(SOCK_W5100S_CLIENT, dev->target_port);
-                setSn_CR(SOCK_W5100S_CLIENT, Sn_CR_CONNECT); while(getSn_CR(SOCK_W5100S_CLIENT));
+                setSn_CR(SOCK_W5100S_CLIENT, Sn_CR_CONNECT); 
+                while(getSn_CR(SOCK_W5100S_CLIENT));
+                
                 vTaskDelay(pdMS_TO_TICKS(100));
             }
 
@@ -203,19 +232,24 @@ void protocol_engine_poll_cycle(const sensor_device_t *sensors, int count) {
                 uint8_t tx_buf[12] = {0,0,0,0,0,6, dev->slave_id, dev->func_code, 
                                       dev->start_reg>>8, dev->start_reg&0xFF, dev->reg_count>>8, dev->reg_count&0xFF};
                 wiz_send_data(SOCK_W5100S_CLIENT, tx_buf, 12);
-                setSn_CR(SOCK_W5100S_CLIENT, Sn_CR_SEND); while(getSn_CR(SOCK_W5100S_CLIENT));
+                setSn_CR(SOCK_W5100S_CLIENT, Sn_CR_SEND); 
+                while(getSn_CR(SOCK_W5100S_CLIENT));
 
                 int wait = dev->timeout_ms;
                 while(getSn_RX_RSR(SOCK_W5100S_CLIENT) == 0 && wait > 0) {
-                    vTaskDelay(pdMS_TO_TICKS(10)); wait -= 10;
+                    vTaskDelay(pdMS_TO_TICKS(10)); 
+                    wait -= 10;
                 }
 
                 int rx_len = getSn_RX_RSR(SOCK_W5100S_CLIENT);
                 if (rx_len > 9) {
                     uint8_t rx_buf[256];
-                    if (rx_len > 256) rx_len = 256;
+                    if (rx_len > 256) {
+                        rx_len = 256;
+                    }
                     wiz_recv_data(SOCK_W5100S_CLIENT, rx_buf, rx_len);
-                    setSn_CR(SOCK_W5100S_CLIENT, Sn_CR_RECV); while(getSn_CR(SOCK_W5100S_CLIENT));
+                    setSn_CR(SOCK_W5100S_CLIENT, Sn_CR_RECV); 
+                    while(getSn_CR(SOCK_W5100S_CLIENT));
                     
                     if (rx_buf[6] == dev->slave_id) {
                         execute_slice_mapping(dev, &rx_buf[9], rx_len - 9);
