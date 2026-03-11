@@ -20,6 +20,11 @@
 #define TAG_ID_LOCAL_RELAY_1    501  ///< 本地继电器 1 控制指令 (Bool)
 #define TAG_ID_LOCAL_RELAY_2    502  ///< 本地继电器 2 控制指令 (Bool)
 
+#define TAG_ID_LOCAL_AIN_0      510  ///< ADS1115 模拟通道 0 电压 (Float32)
+#define TAG_ID_LOCAL_AIN_1      511  ///< ADS1115 模拟通道 1 电压 (Float32)
+#define TAG_ID_LOCAL_AIN_2      512  ///< ADS1115 模拟通道 2 电压 (Float32)
+#define TAG_ID_LOCAL_AIN_3      513  ///< ADS1115 模拟通道 3 电压 (Float32)
+
 /* ============================================================
  * 3. 区域：系统级指示灯与按键测点 (分配空间: 1000 ~ 1099)
  * ============================================================ */

@@ -6,6 +6,7 @@
 
 #include "io_manager.h"
 #include "bsp_i2c.h"
+#include "bsp_ads1115.h"
 #include "bsp_wifi.h" // 获取 AP 模式状态
 #include "register_map.h"
 #include "freertos/FreeRTOS.h"
@@ -111,6 +112,21 @@ static void io_poll_task(void *arg)
         }
         if (out_mask != current_state) {
             bsp_i2c_write(0, PCF8574_ADDR, &out_mask, 1);
+        }
+
+        // ==========================================
+        // 5. 轮询本地 ADS1115 四通道模拟量，上报 RTDB
+        // ==========================================
+        for (int ch = 0; ch < 4; ch++) {
+            float voltage = 0.0f;
+            // 采用 6.144V 宽量程配置，适配工业 5V 传感场景
+            if (bsp_ads1115_read_single_ended(0, ADS1115_I2C_ADDR_GND, ch, ADS1115_PGA_6_144V, &voltage)) {
+                // 直接将读取到的电压值刷入 RTDB 中，业务端无需关心底层 I2C 时序
+                reg_map_update_value(TAG_ID_LOCAL_AIN_0 + ch, voltage);
+            } else {
+                // 若读取失败，系统打上 Timeout / Sensor Error 质量戳
+                reg_map_update_quality(TAG_ID_LOCAL_AIN_0 + ch, TAG_QUAL_BAD_SENSOR_ERR);
+            }
         }
 
         tick_count++;

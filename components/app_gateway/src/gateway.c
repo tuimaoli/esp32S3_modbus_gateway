@@ -3,6 +3,7 @@
  * @brief 应用层：网关引擎核心实现 (动态组态终极版)
  */
 
+#include <string.h>
 #include "gateway.h"
 #include "bsp_uart.h"
 #include "bsp_i2c.h"
@@ -99,7 +100,7 @@ void gateway_init(void) {
     reg_map_add_tag(TAG_ID_LOCAL_RELAY_2, "PCF_Relay2", TAG_TYPE_BOOL, true);
 
     config_manager_load(&g_dynamic_sensors, &g_dynamic_sensor_count);
-    
+
     // 6. 统一热点名称：将解析到的 device_id 注入给底层 Wi-Fi 驱动
     const gateway_config_t* gw_cfg = config_manager_get_gw_cfg();
     if (gw_cfg && strlen(gw_cfg->device_id) > 0) {
