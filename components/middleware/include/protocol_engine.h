@@ -1,10 +1,11 @@
 /**
  * @file protocol_engine.h
  * @brief 中间件层：泛化协议调度引擎 (替代原 modbus_master)
- * @note 架构重构：引入数据抛出回调钩子，彻底与上层 MQTT 解耦
+ * @note V4.0 架构升级：引入反向控制发射队列 (TX Queue) 接口
  */
 #pragma once
 #include <stdint.h>
+#include <stdbool.h>
 #include "modbus_template.h"
 
 #ifdef __cplusplus
@@ -27,7 +28,7 @@ typedef enum {
 } frame_mode_e;
 
 // ==========================================
-// V2.0 升级：多态传感器设备画像 (核心数据模型)
+// V4.0 升级：多态传感器设备画像 (核心数据模型)
 // ==========================================
 typedef struct sensor_device {
     char name[32];              
@@ -91,6 +92,20 @@ void protocol_engine_init(int uart_port);
  * @param count 传感器节点数量
  */
 void protocol_engine_poll_cycle(const sensor_device_t *sensors, int count);
+
+/* ============================================================
+ * V4.0 新增：反向控制神经 (TX Queue)
+ * ============================================================ */
+
+/**
+ * @brief 将北向的写指令压入底层发送队列 (非阻塞)
+ * @note RTDB 的 reg_map_write_value 内部将调用此接口向 RS485 总线注入反向报文
+ * @param slave_id 目标物理从机站号
+ * @param reg_addr 反向映射的物理寄存器地址
+ * @param value 欲写入的值 (目前默认使用 Modbus 06 功能码转为 16 位整型写入)
+ * @return true 压栈成功, false 队列满
+ */
+bool protocol_engine_push_tx_queue(uint8_t slave_id, uint16_t reg_addr, float value);
 
 #ifdef __cplusplus
 }

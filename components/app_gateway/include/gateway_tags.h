@@ -1,22 +1,18 @@
 /**
  * @file gateway_tags.h
- * @brief 应用层：全局测点 (Tag) ID 数据字典
- * @note 统一管理系统内的所有逻辑 ID，消灭魔法数字，防止地址冲突
+ * @brief 应用层：全局系统级测点 ID (Tag) 数据字典
+ * @note 业务层的 JSON 动态点表应从 2000 起始，避开此处的保留号段
  */
 #pragma once
 
-/* ============================================================
- * 1. 区域：房间 1 传感器测点 (分配空间: 100 ~ 199)
- * ============================================================ */
-#define TAG_ID_ROOM1_TEMP       100  ///< 房间1：温度 (Float32)
-#define TAG_ID_ROOM1_HUMI       101  ///< 房间1：湿度 (Float32)
-// ... 预留 102~198 给未来的传感器 ...
-#define TAG_ID_ROOM1_STATUS     199  ///< 房间1：设备整体在线状态 (Bool/U16)
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* ============================================================
- * 2. 区域：本地 I/O 扩展芯片测点 (分配空间: 500 ~ 599)
+ * 1. 区域：本地 I/O 扩展芯片测点 (分配空间: 500 ~ 599)
  * ============================================================ */
-#define TAG_ID_LOCAL_IO_INPUTS  500  ///< PCF8574 整体输入状态掩码 (Int16)
+#define TAG_ID_LOCAL_IO_INPUTS  500  ///< PCF8574 整体输入状态掩码 (Int32)
 #define TAG_ID_LOCAL_RELAY_1    501  ///< 本地继电器 1 控制指令 (Bool)
 #define TAG_ID_LOCAL_RELAY_2    502  ///< 本地继电器 2 控制指令 (Bool)
 
@@ -26,13 +22,13 @@
 #define TAG_ID_LOCAL_AIN_3      513  ///< ADS1115 模拟通道 3 电压 (Float32)
 
 /* ============================================================
- * 3. 区域：系统级指示灯与按键测点 (分配空间: 1000 ~ 1099)
+ * 2. 区域：系统级指示灯与按键测点 (分配空间: 1000 ~ 1099)
  * ============================================================ */
 #define TAG_ID_SYS_BTN_RESET    1000 ///< 物理恢复出厂按键状态 (Bool)
 #define TAG_ID_SYS_LED_1        1021 ///< 系统指示灯 1 (Bool)
 #define TAG_ID_SYS_LED_2        1022 ///< 系统指示灯 2 (Bool)
 #define TAG_ID_SYS_LED_3        1023 ///< 系统指示灯 3 (Bool)
 
-
-#define TAG_ID_ROOM2_STATUS 200
-#define TAG_ID_POWER_VOLTAGE 201
+#ifdef __cplusplus
+}
+#endif

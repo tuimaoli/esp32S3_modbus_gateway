@@ -20,6 +20,7 @@
 
 #include "app_sntp.h"
 #include "app_mqtt.h"
+#include "app_linkage.h"  // 架构：引入联动引擎
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -118,4 +119,7 @@ void gateway_start(void) {
     app_webserver_start();
     app_sntp_init();
     app_mqtt_start(g_dynamic_sensors, g_dynamic_sensor_count);
+    
+    // 启动本地边缘联动引擎
+    app_linkage_start();
 }

@@ -1,59 +1,69 @@
 /**
  * @file modbus_template.h
- * @brief 中间件层：Modbus 数据驱动模板与字节抽取规则定义
- * @note 用于取代硬编码的解析函数，实现基于配置的动态数据萃取
+ * @brief 中间件层：动态模板映射与多态数据类型字典 (V4.0)
+ * @note 统一定义工业现场设备的报文解析规则与反向控制属性
  */
 #pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
- * @brief Modbus 数据类型及字节序 (Endianness) 定义
- * @note 解决不同厂家浮点数、32位整数大小端不一致的痛点
+ * @brief 工业现场多态数据类型字典 (解决大小端与字节序乱象)
+ * @note AB代表大端(Big-Endian), BA代表小端, CDAB代表字反序(Word-Swapped)
  */
 typedef enum {
-    MB_TYPE_BOOL = 0,       ///< 提取单个 Bit (需要 bit_offset)
-    MB_TYPE_INT16_AB,       ///< 16位有符号整数 (大端，标准Modbus)
-    MB_TYPE_UINT16_AB,      ///< 16位无符号整数 (大端)
-    MB_TYPE_INT16_BA,       ///< 16位有符号整数 (小端/字节交换)
+    MB_TYPE_UINT16_AB = 0,   ///< 16位无符号整数 (标准 Modbus)
+    MB_TYPE_UINT16_BA,       ///< 16位无符号整数 (小端)
+    MB_TYPE_INT16_AB,        ///< 16位有符号整数 (标准)
+    MB_TYPE_INT16_BA,        ///< 16位有符号整数 (小端)
     
-    MB_TYPE_INT32_ABCD,     ///< 32位整数 (大端)
-    MB_TYPE_INT32_CDAB,     ///< 32位整数 (字交换，最常见)
-    MB_TYPE_INT32_DCBA,     ///< 32位整数 (小端)
+    MB_TYPE_UINT32_ABCD,     ///< 32位无符号整数 (大端)
+    MB_TYPE_UINT32_CDAB,     ///< 32位无符号整数 (字反序，西门子/施耐德常用)
+    MB_TYPE_UINT32_BADC,     ///< 32位无符号整数 (字节反序)
+    MB_TYPE_UINT32_DCBA,     ///< 32位无符号整数 (小端)
     
-    MB_TYPE_FLOAT32_ABCD,   ///< 标准 IEEE754 单精度浮点 (大端)
-    MB_TYPE_FLOAT32_CDAB,   ///< 浮点数字交换 (工业界极为常见)
-    MB_TYPE_FLOAT32_DCBA    ///< 浮点数 (小端)
+    MB_TYPE_INT32_ABCD,      ///< 32位有符号整数 (大端)
+    MB_TYPE_INT32_CDAB,      ///< 32位有符号整数 (字反序)
+    
+    MB_TYPE_FLOAT32_ABCD,    ///< 32位 IEEE754 浮点数 (大端)
+    MB_TYPE_FLOAT32_CDAB,    ///< 32位 IEEE754 浮点数 (字反序)
+    MB_TYPE_FLOAT32_BADC,    ///< 32位 IEEE754 浮点数 (字节反序)
+    MB_TYPE_FLOAT32_DCBA     ///< 32位 IEEE754 浮点数 (小端)
 } modbus_data_type_e;
 
 /**
- * @brief 单个测点的映射规则 (Mapping Rule)
- * @note 相当于上位机 Excel 表格中的“一行”配置
+ * @brief 单个测点的解析映射与控制规则模型
  */
 typedef struct {
-    char name[32];          ///< 测点名称，供 MQTT 拼装 JSON 键值对使用
-    uint16_t target_tag_id; ///< 解析后要存入的 RTDB 逻辑 ID
-    uint16_t byte_offset;   ///< 在原始 Payload 中的字节偏移量 (例如: 从第 4 字节开始取)
-    uint8_t  bit_offset;    ///< 位偏移量 0~15 (仅当类型为 MB_TYPE_BOOL 时有效)
-    modbus_data_type_e type;///< 数据类型及字节序解码方式
-    float    scale;         ///< 缩放系数 (例如: 读到 123, scale=0.1, 存入RTDB为 12.3)
+    char     name[32];          ///< 测点业务名称 (如 "temperature")
+    uint16_t target_tag_id;     ///< 解析后抛给 RTDB 的目标虚拟逻辑 ID
+    
+    /* * 架构魔法：使用 C11 匿名联合体 
+     * 完美兼容 ConfigManager(使用 offset) 和 ProtocolEngine(使用 byte_offset) 的不同命名习惯
+     */
+    union {
+        uint16_t offset;
+        uint16_t byte_offset;   ///< 在原始报文 Payload 中的字节偏移量
+    };
+    
+    uint8_t  type;              ///< 数据类型 (对应 modbus_data_type_e 枚举)
+    uint8_t  bit;               ///< 位偏移 (暂预留，用于后续按位提取开关量)
+    float    scale;             ///< 缩放因子 (如 0.1 表示将读数除以 10)
+    
+    /* ============================================================
+     * V4.0 边缘联动与反向控制高级属性
+     * ============================================================ */
+    bool     writable;          ///< 是否允许北向或边缘联动引擎覆盖写入
+    bool     persist;           ///< 是否开启 NVS 掉电记忆保护
+    uint16_t reverse_reg;       ///< 反向控制映射：向物理从机下发写指令的目标寄存器地址 (0xFFFF 视为无物理映射)
+    
 } modbus_mapping_rule_t;
 
-/**
- * @brief 动态传感器设备画像 (Device Profile)
- * @note 替代原有的固定结构体，内部持有动态分配的规则表
- */
-typedef struct {
-    uint8_t slave_id;       ///< 从站 ID
-    modbus_mapping_rule_t *mapping_rules; ///< 动态数组指针：存放所有测点的抽取规则
-    int rule_count;         ///< 这个传感器包含了多少个映射测点
-} sensor_profile_t;
-
-/**
- * @brief 通用负载解析引擎 (核心)
- * @param rx_payload Modbus 响应报文的数据部分 (跳过了 SlaveID、Func 和 ByteCount)
- * @param payload_len 纯数据部分的字节长度
- * @param profile 该传感器对应的画像规则
- */
-void modbus_universal_parser(const uint8_t *rx_payload, uint16_t payload_len, const sensor_profile_t *profile);
+#ifdef __cplusplus
+}
+#endif

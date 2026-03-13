@@ -72,15 +72,22 @@ static void captive_dns_task(void *pvParameters) {
         .sin_addr.s_addr = htonl(INADDR_ANY)
     };
     bind(sock, (struct sockaddr *)&server_addr, sizeof(server_addr));
+    
+    // ⚡ 架构升级：设置 Socket 接收超时，防止死锁，允许任务检查生命周期标志位
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
     ESP_LOGI(TAG, "Captive Portal DNS Server started on port 53");
 
     uint8_t rx_buf[128];
-    while (1) {
+    // 只要热点模式激活，就一直循环；热点关闭，立刻退出循环
+    while (g_ap_mode_active) {
         struct sockaddr_in client_addr;
         socklen_t len = sizeof(client_addr);
         int rx_len = recvfrom(sock, rx_buf, sizeof(rx_buf), 0, (struct sockaddr *)&client_addr, &len);
         
-        if (rx_len > 12 && g_ap_mode_active) {
+        // 正常收到 DNS 请求包
+        if (rx_len > 12) {
             rx_buf[2] = 0x81; rx_buf[3] = 0x80;
             rx_buf[6] = 0x00; rx_buf[7] = 0x01;
             rx_buf[8] = 0x00; rx_buf[9] = 0x00;
@@ -93,6 +100,12 @@ static void captive_dns_task(void *pvParameters) {
             }
         }
     }
+    
+    // 自杀：释放网络套接字 -> 清除句柄 -> 删除任务自身，完美回收 3KB 内存
+    ESP_LOGI(TAG, "Captive Portal disabled. Reclaiming DNS task resources.");
+    close(sock);
+    g_dns_task_handle = NULL;
+    vTaskDelete(NULL);
 }
 
 /* ============================================================

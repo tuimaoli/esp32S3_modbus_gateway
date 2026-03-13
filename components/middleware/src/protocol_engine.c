@@ -1,12 +1,12 @@
 /**
  * @file protocol_engine.c
  * @brief 中间件层：泛化协议引擎 (SDH 软件定义硬件核心)
- * @note 修复了架构依赖倒置问题，采用函数指针 Callback 将数据抛出给 App 层
+ * @note V4.0 修正版：统一使用 utils.h 的 UTILS_CRC16 宏，SCADA 状态字对齐
  */
 #include "protocol_engine.h"
 #include "bsp_uart.h"
 #include "register_map.h"
-#include "modbus_utils.h"
+#include "utils.h"       // 架构修正：统一引用包含高频 CRC16 算法的全局工具类
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -29,6 +29,16 @@ static int g_rs485_rx_len = 0;
 // 上层注册的异步抛出回调钩子
 static protocol_data_cb_t g_data_cb = NULL;
 
+// 发送控制请求的结构体
+typedef struct {
+    uint8_t  slave_id;
+    uint16_t reg_addr;
+    uint16_t reg_value;
+} tx_req_t;
+
+static QueueHandle_t g_tx_queue = NULL;
+#define TX_QUEUE_SIZE 20
+
 void protocol_engine_register_data_cb(protocol_data_cb_t cb) {
     g_data_cb = cb;
 }
@@ -36,6 +46,9 @@ void protocol_engine_register_data_cb(protocol_data_cb_t cb) {
 void protocol_engine_init(int uart_port) { 
     g_master_port = uart_port; 
     g_rs485_rx_len = 0;
+    if (g_tx_queue == NULL) {
+        g_tx_queue = xQueueCreate(TX_QUEUE_SIZE, sizeof(tx_req_t));
+    }
 }
 
 /* ============================================================
@@ -149,9 +162,62 @@ static bool process_custom_sliding_window(const sensor_device_t *dev, uint8_t *b
 }
 
 /* ============================================================
+ * 反向控制：压栈与执行 (TX Queue)
+ * ============================================================ */
+bool protocol_engine_push_tx_queue(uint8_t slave_id, uint16_t reg_addr, float value) {
+    if (!g_tx_queue) return false;
+    tx_req_t req;
+    req.slave_id = slave_id;
+    req.reg_addr = reg_addr;
+    req.reg_value = (uint16_t)value; 
+    
+    return (xQueueSend(g_tx_queue, &req, 0) == pdTRUE);
+}
+
+static void process_pending_tx_queue(void) {
+    tx_req_t req;
+    while (g_tx_queue != NULL && xQueueReceive(g_tx_queue, &req, 0) == pdTRUE) {
+        if (g_master_port < 0) continue;
+
+        ESP_LOGW(TAG, "Executing Reverse Write: Slave %d, Reg %d, Val %d", req.slave_id, req.reg_addr, req.reg_value);
+
+        // 组装标准 Modbus 06 功能码 (写单个保持寄存器)
+        uint8_t tx_buf[8];
+        tx_buf[0] = req.slave_id;
+        tx_buf[1] = 0x06; 
+        tx_buf[2] = req.reg_addr >> 8;
+        tx_buf[3] = req.reg_addr & 0xFF;
+        tx_buf[4] = req.reg_value >> 8;
+        tx_buf[5] = req.reg_value & 0xFF;
+        
+        uint16_t crc = UTILS_CRC16(tx_buf, 6);
+        tx_buf[6] = crc & 0xFF;
+        tx_buf[7] = crc >> 8;
+
+        bsp_uart_flush(g_master_port);
+        bsp_uart_send(g_master_port, tx_buf, 8);
+
+        // 等待从机回复 ACK
+        uint8_t rx_buf[16];
+        int rx_len = bsp_uart_recv(g_master_port, rx_buf, sizeof(rx_buf), 200);
+        
+        if (rx_len == 8 && rx_buf[0] == req.slave_id && rx_buf[1] == 0x06) {
+            ESP_LOGI(TAG, "Write success ACK received.");
+        } else {
+            ESP_LOGE(TAG, "Write failed or timeout.");
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(15));
+    }
+}
+
+/* ============================================================
  * 核心对外接口：主循环调度
  * ============================================================ */
 void protocol_engine_poll_cycle(const sensor_device_t *sensors, int count) {
+    // ⚡ 每次大循环开始前，优先消化并拦截北向的控制下发
+    process_pending_tx_queue();
+
     for (int i = 0; i < count; i++) {
         const sensor_device_t *dev = &sensors[i];
         bool link_alive = false;
@@ -161,7 +227,7 @@ void protocol_engine_poll_cycle(const sensor_device_t *sensors, int count) {
          * ========================================================== */
         if (dev->transport == 0 && g_master_port >= 0) {
             
-            // 如果是一问一答型 (Modbus 或 Custom Poll)，下发 TX
+            // 如果是一问一答型，下发 TX
             if (dev->protocol == PROTO_MODBUS_RTU) {
                 uint8_t tx_buf[8];
                 tx_buf[0] = dev->slave_id; 
@@ -170,9 +236,11 @@ void protocol_engine_poll_cycle(const sensor_device_t *sensors, int count) {
                 tx_buf[3] = dev->start_reg & 0xFF;
                 tx_buf[4] = dev->reg_count >> 8; 
                 tx_buf[5] = dev->reg_count & 0xFF;
-                uint16_t crc = modbus_crc16(tx_buf, 6);
+                
+                uint16_t crc = UTILS_CRC16(tx_buf, 6);  // 架构修正：统一使用 utils.h 的宏
                 tx_buf[6] = crc & 0xFF; 
                 tx_buf[7] = crc >> 8;
+                
                 bsp_uart_flush(g_master_port);
                 bsp_uart_send(g_master_port, tx_buf, 8);
             } else if (dev->protocol == PROTO_CUSTOM_POLL && dev->custom.tx_len > 0) {
@@ -180,7 +248,7 @@ void protocol_engine_poll_cycle(const sensor_device_t *sensors, int count) {
                 bsp_uart_send(g_master_port, dev->custom.tx_payload, dev->custom.tx_len);
             }
 
-            // 无论哪种协议 (包括纯监听的 REPORT 模式)，都去读串口追加到缓冲池
+            // 无论哪种协议，读取串口追加到缓冲池
             uint8_t temp_rx[256];
             int rx_len = bsp_uart_recv(g_master_port, temp_rx, sizeof(temp_rx), dev->timeout_ms > 0 ? dev->timeout_ms : 50);
             
@@ -259,8 +327,10 @@ void protocol_engine_poll_cycle(const sensor_device_t *sensors, int count) {
             }
         }
 
-        // 统一链路健康度管理
-        reg_map_update_value(dev->status_tag_id, link_alive ? 1.0f : 0.0f);
+        // ⚡ 架构修正：使用企业级 SCADA 状态字更新健康度 (1.0 = GOOD, 3.0 = OFFLINE_TIMEOUT)
+        if (dev->status_tag_id > 0) {
+            reg_map_update_value(dev->status_tag_id, link_alive ? 1.0f : 3.0f);
+        }
         
         // 基于轮询间隔进行高级调度挂起 (防止占死 CPU)
         if (dev->protocol != PROTO_CUSTOM_REPORT && dev->poll_interval_ms > 0) {

@@ -70,7 +70,7 @@ static void io_poll_task(void *arg)
                 reg_map_update_value(TAG_ID_SYS_LED_3, step == 2 ? 1.0f : 0.0f);
             }
         } else {
-            // 在线模式下：交由业务自由发挥。例如根据网络连通性点亮常亮灯：
+            // 在线模式下：可以根据网关连通性点亮常亮灯
             // float is_online = bsp_wifi_is_connected() ? 1.0f : 0.0f;
             // reg_map_update_value(TAG_ID_SYS_LED_1, is_online);
         }
@@ -94,12 +94,14 @@ static void io_poll_task(void *arg)
         esp_err_t ret = bsp_i2c_read(0, PCF8574_ADDR, &current_state, 1);
         
         if (ret == ESP_OK) {
+            // 输入上报：如果有输入状态改变，更新给 RTDB
             if (current_state != last_input) {
                 last_input = current_state;
-                reg_map_update_value(500, (float)current_state);
+                reg_map_update_value(TAG_ID_LOCAL_IO_INPUTS, (float)current_state);
             }
         }
 
+        // 输出控制：读取 RTDB，写入到 I2C 扩展芯片
         float out1_val = 0.0f; float out2_val = 0.0f;
         tag_quality_t q1, q2;
         uint8_t out_mask = current_state; 
@@ -125,12 +127,12 @@ static void io_poll_task(void *arg)
                 reg_map_update_value(TAG_ID_LOCAL_AIN_0 + ch, voltage);
             } else {
                 // 若读取失败，系统打上 Timeout / Sensor Error 质量戳
-                reg_map_update_quality(TAG_ID_LOCAL_AIN_0 + ch, TAG_QUAL_BAD_SENSOR_ERR);
+                reg_map_update_quality(TAG_ID_LOCAL_AIN_0 + ch, TAG_QUAL_SENSOR_ERR);
             }
         }
 
         tick_count++;
-        vTaskDelay(pdMS_TO_TICKS(100)); // 100ms 刷新周期
+        vTaskDelay(pdMS_TO_TICKS(100)); // 100ms 刷新周期，保障响应与性能平衡
     }
 }
 
@@ -155,6 +157,10 @@ void io_manager_init(void) {
     gpio_config(&led_conf);
 
     // 3. 向网关中枢注册系统级虚拟测点 (供外界查询或后续远程覆盖)
+    // 基础IO掩码
+    reg_map_add_tag(TAG_ID_LOCAL_IO_INPUTS, "PCF_Inputs", TAG_TYPE_INT32, true);
+    
+    // 按键与LED灯
     reg_map_add_tag(TAG_ID_SYS_BTN_RESET, "SYS_Btn_Reset", TAG_TYPE_BOOL, false);
     reg_map_add_tag(TAG_ID_SYS_LED_1, "SYS_LED_1", TAG_TYPE_BOOL, false);
     reg_map_add_tag(TAG_ID_SYS_LED_2, "SYS_LED_2", TAG_TYPE_BOOL, false);
