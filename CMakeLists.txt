@@ -5,4 +5,5 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+set(PROJECT_VER "V4.2.0")
 project(esp32S3_modbus_gateway)

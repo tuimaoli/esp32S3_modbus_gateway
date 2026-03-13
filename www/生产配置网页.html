@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-S3 边缘网关组态配置台 V4.2</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <style>
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        body { background-color: #f3f4f6; font-family: 'Segoe UI', system-ui, sans-serif; }
+    </style>
+</head>
+<body>
+    <div id="app" class="min-h-screen flex flex-col">
+        <!-- 顶部导航栏 -->
+        <header class="bg-slate-900 text-white shadow-lg z-10">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <svg class="w-8 h-8 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                    <h1 class="text-xl font-bold tracking-wider">EDGE GATEWAY <span class="text-blue-400 font-light">CONFIGURATOR V4.2</span></h1>
+                </div>
+                <div class="flex space-x-1 border border-slate-700 bg-slate-800 rounded-lg p-1">
+                    <button v-for="tab in tabs" :key="tab.id" @click="currentTab = tab.id"
+                        :class="['px-4 py-1.5 rounded-md text-sm font-medium transition-colors duration-200', 
+                                currentTab === tab.id ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700']">
+                        {{ tab.name }}
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- 主体内容区 -->
+        <main class="flex-1 max-w-7xl mx-auto w-full p-6">
+            
+            <!-- ⚡ 新增：全局系统状态栏 (独立于 JSON) -->
+            <div class="bg-indigo-900 text-indigo-100 rounded-lg p-3 mb-6 flex justify-between items-center text-sm shadow-md">
+                <div class="flex items-center gap-4">
+                    <span class="font-bold text-white border-r border-indigo-700 pr-4">💻 硬件设备底包信息</span>
+                    <span>固件版本: <span class="font-mono text-green-400 font-bold">{{ sysinfo.firmware_ver }}</span></span>
+                    <span>编译时间: <span class="font-mono text-indigo-300">{{ sysinfo.compile_date }}</span></span>
+                </div>
+                <div>
+                    <span>ESP-IDF: <span class="font-mono text-indigo-300">{{ sysinfo.idf_ver }}</span></span>
+                </div>
+            </div>
+
+            <!-- Tab 1: 全局网络配置 (优化本地 IO 动态配置) -->
+            <div v-show="currentTab === 'global'" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 animate-fade-in">
+                <h2 class="text-lg font-bold text-gray-800 border-b pb-3 mb-5 flex items-center gap-2">
+                    <span>🌐</span> 网关基础与网络属性
+                </h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-700 mb-1">资产编号 (Device ID) *</label>
+                        <input v-model="cfg.gateway_config.device_id" type="text" class="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例如: GW_FACTORY_001 或 AUTO">
+                        <p class="text-[11px] text-gray-400 mt-1">填 "AUTO" 将自动提取硬件 MAC 地址</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-700 mb-1">MQTT Broker 地址 *</label>
+                        <input v-model="cfg.gateway_config.mqtt_broker" type="text" class="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 outline-none" placeholder="mqtt://192.168.1.100:1883">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-700 mb-1">MQTT 用户名</label>
+                        <input v-model="cfg.gateway_config.mqtt_user" type="text" class="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-700 mb-1">MQTT 密码</label>
+                        <input v-model="cfg.gateway_config.mqtt_pass" type="password" class="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    
+                    <div class="bg-blue-50 p-3 rounded-lg border border-blue-100">
+                        <label class="block text-sm font-bold text-blue-900 mb-1">定时全量快照上报周期 (ms)</label>
+                        <input v-model.number="cfg.gateway_config.upload_interval_ms" type="number" class="w-full px-3 py-2 border border-blue-200 rounded-md focus:ring-2 focus:ring-blue-500 outline-none">
+                        <p class="text-[11px] text-blue-500 mt-1 font-semibold">💡 提示：填 0 或负数将彻底关闭主动上报功能</p>
+                    </div>
+                    <div class="bg-emerald-50 p-3 rounded-lg border border-emerald-100">
+                        <label class="block text-sm font-bold text-emerald-900 mb-1">MQTT 下发控制主题 (Sub Topics)</label>
+                        <input v-model="subTopicsStr" type="text" class="w-full px-3 py-2 border border-emerald-200 rounded-md focus:ring-2 focus:ring-emerald-500 outline-none">
+                        <p class="text-[11px] text-emerald-600 mt-1">💡 提示：用逗号分隔。</p>
+                    </div>
+
+                    <!-- 🚀 V4.2 核心重构：本地物理/系统测点动态属性字典 -->
+                    <div class="md:col-span-2 border-t border-gray-100 pt-5 mt-2">
+                        <div class="flex justify-between items-center mb-3">
+                            <h3 class="text-sm font-bold text-gray-800 flex items-center gap-2"><span>🔌</span> 本地物理/系统测点高级配置 (Local Tags)</h3>
+                            <button @click="addLocalTag" class="text-xs bg-gray-800 text-white px-2 py-1 rounded shadow hover:bg-gray-700">+ 新增配置</button>
+                        </div>
+                        
+                        <div class="bg-gray-50 p-4 rounded-lg border border-gray-200 overflow-x-auto">
+                            <table class="w-full text-sm text-left">
+                                <thead class="text-xs text-gray-500 uppercase bg-gray-100 border-b">
+                                    <tr>
+                                        <th class="px-3 py-2 w-32">系统 Tag ID</th>
+                                        <th class="px-3 py-2 w-24 text-center">掉电记忆</th>
+                                        <th class="px-3 py-2 w-32" title="运算：(原始值 * Scale) + Offset">缩放倍率 (Scale)</th>
+                                        <th class="px-3 py-2 w-32">线性偏移 (Offset)</th>
+                                        <th class="px-3 py-2 w-16 text-center">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="(lt, idx) in cfg.gateway_config.local_tags" :key="idx" class="border-b bg-white hover:bg-gray-50">
+                                        <td class="px-3 py-2">
+                                            <input v-model.number="lt.tag_id" type="number" class="w-full px-2 py-1 border rounded text-xs outline-none focus:ring-1 focus:ring-blue-500" placeholder="如 501 或 510">
+                                        </td>
+                                        <td class="px-3 py-2 text-center">
+                                            <input type="checkbox" v-model="lt.persist" class="w-4 h-4 text-blue-600 rounded cursor-pointer">
+                                        </td>
+                                        <td class="px-3 py-2">
+                                            <input v-model.number="lt.scale" type="number" step="0.001" class="w-full px-2 py-1 border rounded text-xs outline-none focus:ring-1 focus:ring-blue-500" placeholder="默认 1.0">
+                                        </td>
+                                        <td class="px-3 py-2">
+                                            <input v-model.number="lt.offset" type="number" step="0.001" class="w-full px-2 py-1 border rounded text-xs outline-none focus:ring-1 focus:ring-blue-500" placeholder="默认 0.0">
+                                        </td>
+                                        <td class="px-3 py-2 text-center">
+                                            <button @click="removeLocalTag(idx)" class="text-red-500 hover:text-red-700 font-bold">×</button>
+                                        </td>
+                                    </tr>
+                                    <tr v-if="!cfg.gateway_config.local_tags || cfg.gateway_config.local_tags.length === 0">
+                                        <td colspan="5" class="px-3 py-4 text-center text-xs text-gray-400">所有本地测点均使用默认出厂配置 (无记忆、无缩放)</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            <p class="text-[10px] text-gray-400 mt-2">提示：填入 501/502 (继电器) 可开启记忆；填入 510~513 (ADC) 可配置缩放公式转换物理量。</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 2: 传感器与测点字典 (核心复杂区) -->
+            <div v-show="currentTab === 'sensors'" class="flex gap-6 h-[75vh]">
+                <!-- 左侧：传感器列表 -->
+                <div class="w-1/3 bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                    <div class="p-4 border-b bg-gray-50 flex justify-between items-center">
+                        <h3 class="font-bold text-gray-700">挂载设备清单</h3>
+                        <button @click="addSensor" class="bg-blue-600 hover:bg-blue-700 text-white p-1.5 rounded-md shadow flex items-center gap-1 text-sm">
+                            <span class="font-bold">+</span> 新增设备
+                        </button>
+                    </div>
+                    <div class="flex-1 overflow-y-auto p-2 space-y-2 no-scrollbar">
+                        <div v-for="(sensor, idx) in cfg.sensors" :key="idx" 
+                            @click="activeSensorIdx = idx"
+                            :class="['p-3 rounded-lg border cursor-pointer transition-all', activeSensorIdx === idx ? 'border-blue-500 bg-blue-50 shadow-sm' : 'border-gray-200 hover:border-blue-300 hover:bg-gray-50']">
+                            <div class="flex justify-between items-start">
+                                <div class="font-semibold text-gray-800">{{ sensor.name || '未命名设备' }}</div>
+                                <button @click.stop="removeSensor(idx)" class="text-red-400 hover:text-red-600">删除</button>
+                            </div>
+                            <div class="text-xs text-gray-500 mt-1 flex gap-2">
+                                <span class="bg-gray-200 px-1.5 py-0.5 rounded">{{ getTransportName(sensor.transport) }}</span>
+                                <span class="bg-gray-200 px-1.5 py-0.5 rounded">{{ getProtocolName(sensor.protocol) }}</span>
+                            </div>
+                        </div>
+                        <div v-if="cfg.sensors.length === 0" class="text-center text-gray-400 py-10 text-sm">
+                            暂无设备，请点击右上角新增
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 右侧：选中传感器的详细配置与点表 -->
+                <div class="w-2/3 bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden" v-if="activeSensorIdx !== null && cfg.sensors[activeSensorIdx]">
+                    <div class="p-4 border-b bg-gray-50">
+                        <h3 class="font-bold text-gray-700 flex items-center gap-2">
+                            <span>⚙️</span> 设备通信参数配置
+                        </h3>
+                    </div>
+                    <div class="flex-1 overflow-y-auto p-5 no-scrollbar">
+                        <div class="grid grid-cols-3 gap-4 mb-6">
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-600 mb-1">设备名称</label>
+                                <input v-model="cfg.sensors[activeSensorIdx].name" type="text" class="w-full px-2 py-1.5 border rounded focus:ring-1 focus:ring-blue-500 outline-none text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-600 mb-1">物理链路 (Transport)</label>
+                                <select v-model.number="cfg.sensors[activeSensorIdx].transport" class="w-full px-2 py-1.5 border rounded focus:ring-1 focus:ring-blue-500 outline-none text-sm bg-white">
+                                    <option value="0">RS485 总线</option>
+                                    <option value="1">W5100S 硬件以太网</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-600 mb-1">协议规范 (Protocol)</label>
+                                <select v-model.number="cfg.sensors[activeSensorIdx].protocol" class="w-full px-2 py-1.5 border rounded focus:ring-1 focus:ring-blue-500 outline-none text-sm bg-white">
+                                    <option value="0">Modbus RTU</option>
+                                    <option value="1">Modbus TCP</option>
+                                    <option value="2">非标: 自定义问答</option>
+                                </select>
+                            </div>
+                            
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-600 mb-1">轮询间隔 (ms)</label>
+                                <input v-model.number="cfg.sensors[activeSensorIdx].poll_interval_ms" type="number" class="w-full px-2 py-1.5 border rounded text-sm outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-600 mb-1">超时时间 (ms)</label>
+                                <input v-model.number="cfg.sensors[activeSensorIdx].timeout_ms" type="number" class="w-full px-2 py-1.5 border rounded text-sm outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-600 mb-1">健康状态映射 Tag ID</label>
+                                <input v-model.number="cfg.sensors[activeSensorIdx].status_tag_id" type="number" class="w-full px-2 py-1.5 border rounded text-sm outline-none" placeholder="如 2001">
+                            </div>
+
+                            <!-- Modbus 专属配置 -->
+                            <template v-if="cfg.sensors[activeSensorIdx].protocol <= 1">
+                                <div>
+                                    <label class="block text-xs font-semibold text-gray-600 mb-1">从机号 (Slave ID)</label>
+                                    <input v-model.number="cfg.sensors[activeSensorIdx].slave_id" type="number" class="w-full px-2 py-1.5 border rounded text-sm outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-semibold text-gray-600 mb-1">功能码 (Func Code)</label>
+                                    <select v-model.number="cfg.sensors[activeSensorIdx].func_code" class="w-full px-2 py-1.5 border rounded text-sm outline-none bg-white">
+                                        <option value="3">03 - 读保持寄存器</option>
+                                        <option value="4">04 - 读输入寄存器</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-semibold text-gray-600 mb-1">起始地址 (Reg Addr)</label>
+                                    <input v-model.number="cfg.sensors[activeSensorIdx].start_reg" type="number" class="w-full px-2 py-1.5 border rounded text-sm outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-semibold text-gray-600 mb-1">读取数量 (Reg Count)</label>
+                                    <input v-model.number="cfg.sensors[activeSensorIdx].reg_count" type="number" class="w-full px-2 py-1.5 border rounded text-sm outline-none">
+                                </div>
+                            </template>
+                        </div>
+
+                        <!-- 测点映射规则表 -->
+                        <div class="border-t pt-4 mt-2">
+                            <div class="flex justify-between items-center mb-3">
+                                <h4 class="font-bold text-gray-700 text-sm">📋 测点解析与控制映射字典 (Rules)</h4>
+                                <button @click="addRule" class="bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-1 rounded text-xs shadow">添加测点</button>
+                            </div>
+                            
+                            <div class="overflow-x-auto border rounded-lg">
+                                <table class="min-w-full divide-y divide-gray-200 text-sm">
+                                    <thead class="bg-gray-100">
+                                        <tr>
+                                            <th class="px-2 py-2 text-left font-semibold text-gray-600">业务别名</th>
+                                            <th class="px-2 py-2 text-left font-semibold text-gray-600">虚拟 Tag ID</th>
+                                            <th class="px-2 py-2 text-left font-semibold text-gray-600" title="报文中的字节偏移量">Offset</th>
+                                            <th class="px-2 py-2 text-left font-semibold text-gray-600">数据类型字典</th>
+                                            <th class="px-2 py-2 text-left font-semibold text-gray-600">缩放(Scale)</th>
+                                            <th class="px-2 py-2 text-center font-semibold text-gray-600" title="是否允许北向控制">高级控制</th>
+                                            <th class="px-2 py-2"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="bg-white divide-y divide-gray-100">
+                                        <tr v-for="(rule, rIdx) in cfg.sensors[activeSensorIdx].rules" :key="rIdx" class="hover:bg-gray-50">
+                                            <td class="px-2 py-1.5"><input v-model="rule.name" type="text" class="w-24 px-1 py-1 border rounded text-xs"></td>
+                                            <td class="px-2 py-1.5"><input v-model.number="rule.target_tag_id" type="number" class="w-16 px-1 py-1 border rounded text-xs"></td>
+                                            <td class="px-2 py-1.5"><input v-model.number="rule.offset" type="number" class="w-12 px-1 py-1 border rounded text-xs"></td>
+                                            <td class="px-2 py-1.5">
+                                                <select v-model.number="rule.type" class="w-36 px-1 py-1 border rounded text-xs bg-white">
+                                                    <option value="0">UINT16_AB</option>
+                                                    <option value="1">UINT16_BA (小端)</option>
+                                                    <option value="2">INT16_AB</option>
+                                                    <option value="3">INT16_BA (小端)</option>
+                                                    <option value="4">UINT32_ABCD</option>
+                                                    <option value="5">UINT32_CDAB (字反)</option>
+                                                    <option value="8">INT32_ABCD</option>
+                                                    <option value="9">INT32_CDAB (字反)</option>
+                                                    <option value="10">FLOAT32_ABCD</option>
+                                                    <option value="11">FLOAT32_CDAB (字反)</option>
+                                                    <option value="13">FLOAT32_DCBA (小端)</option>
+                                                </select>
+                                            </td>
+                                            <td class="px-2 py-1.5"><input v-model.number="rule.scale" type="number" step="0.01" class="w-16 px-1 py-1 border rounded text-xs"></td>
+                                            <td class="px-2 py-1.5">
+                                                <div class="flex gap-2 text-xs items-center justify-center">
+                                                    <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" v-model="rule.writable">写</label>
+                                                    <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" v-model="rule.persist">记</label>
+                                                </div>
+                                                <input v-if="rule.writable" v-model.number="rule.reverse_reg" type="number" class="w-full mt-1 px-1 py-1 border rounded text-[10px]" placeholder="反向寄存器地址">
+                                            </td>
+                                            <td class="px-2 py-1.5 text-center">
+                                                <button @click="removeRule(rIdx)" class="text-red-500 hover:text-red-700 font-bold">×</button>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 3: 边缘联动规则 -->
+            <div v-show="currentTab === 'linkage'" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                <div class="flex justify-between items-center border-b pb-3 mb-5">
+                    <h2 class="text-lg font-bold text-gray-800 flex items-center gap-2">
+                        <span>⚡</span> 边缘计算与控制联动 (Soft-PLC)
+                    </h2>
+                    <button @click="addLinkage" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-md shadow text-sm font-semibold">
+                        + 添加新逻辑
+                    </button>
+                </div>
+                
+                <div class="grid grid-cols-1 gap-4">
+                    <div v-for="(rule, idx) in cfg.linkage_rules" :key="idx" class="border border-indigo-100 bg-indigo-50/30 p-4 rounded-lg flex items-start gap-4 shadow-sm">
+                        <div class="flex flex-col gap-2 w-1/4">
+                            <label class="text-xs font-semibold text-gray-500">逻辑别名</label>
+                            <input v-model="rule.name" type="text" class="px-2 py-1.5 border rounded text-sm outline-none font-semibold text-indigo-900">
+                            <label class="flex items-center gap-2 text-sm cursor-pointer text-gray-700 mt-1">
+                                <input type="checkbox" v-model="rule.enable" class="w-4 h-4 text-indigo-600"> 激活规则
+                            </label>
+                        </div>
+                        
+                        <div class="flex flex-col gap-2 w-2/4">
+                            <label class="text-xs font-semibold text-gray-500">触发条件表达式 (Condition)</label>
+                            <input v-model="rule.condition" type="text" class="px-2 py-1.5 border border-indigo-200 rounded text-sm font-mono text-indigo-800 outline-none w-full shadow-inner" placeholder="如: TAG(3001) > 35.0 && TAG(3002) == 0">
+                            <span class="text-[10px] text-gray-400">支持四则运算、多级括号、逻辑与/或及 ABS(), ROUND() 等数学函数</span>
+                        </div>
+                        
+                        <div class="flex flex-col gap-2 w-1/4 relative bg-white p-3 rounded border border-indigo-100">
+                            <div class="absolute -left-5 top-1/2 -translate-y-1/2 text-xl">➡️</div>
+                            <label class="text-xs font-bold text-indigo-700 border-b pb-1">满足条件后执行的动作</label>
+                            <div class="flex gap-2 mt-1">
+                                <div class="w-1/2">
+                                    <input v-model.number="rule.action_tag_id" type="number" class="w-full px-2 py-1.5 border border-gray-300 rounded text-sm outline-none focus:border-indigo-500" placeholder="如: 501">
+                                    <span class="text-[10px] text-gray-400">目标测点 (Tag ID)</span>
+                                </div>
+                                <div class="w-1/2">
+                                    <input v-model.number="rule.action_value" type="number" step="0.1" class="w-full px-2 py-1.5 border border-gray-300 rounded text-sm outline-none focus:border-indigo-500" placeholder="如: 1.0">
+                                    <span class="text-[10px] text-gray-400">欲写入数值 (Value)</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <button @click="removeLinkage(idx)" class="ml-auto text-red-400 hover:text-red-600 p-2 font-bold text-xl">×</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 🚀 Tab 4: JSON 源码同步与导入/导出 -->
+            <div v-show="currentTab === 'json'" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 flex flex-col h-[75vh]">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-lg font-bold text-gray-800">📄 组态源码 (双向同步)</h2>
+                    <div class="flex gap-3">
+                        <input type="file" ref="fileInput" accept=".json" class="hidden" @change="importJsonFile">
+                        <button @click="$refs.fileInput.click()" class="bg-slate-600 hover:bg-slate-700 text-white px-4 py-2 rounded shadow flex items-center gap-1 text-sm font-semibold">
+                            <span>📂</span> 从本地导入
+                        </button>
+                        <button @click="applyJsonToUI" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded shadow flex items-center gap-1 text-sm font-semibold">
+                            <span>🔄</span> 覆盖同步至 UI
+                        </button>
+                        <button @click="downloadJson" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded shadow flex items-center gap-1 text-sm font-semibold">
+                            <span>⬇️</span> 下载至本地
+                        </button>
+                    </div>
+                </div>
+                <div class="mb-2 text-xs text-gray-500 bg-blue-50 border border-blue-100 p-2 rounded">
+                    💡 **高级功能**：在此直接粘贴您手写的 JSON 源码，点击【覆盖同步至 UI】后，整个图形界面的参数都会随之更新。您可以结合记事本快速完成批量修改！
+                </div>
+                <textarea v-model="currentJsonText" class="flex-1 w-full bg-slate-900 text-green-400 font-mono text-sm p-4 rounded-lg outline-none resize-none border border-slate-700 shadow-inner no-scrollbar"></textarea>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- Vue 3 核心业务逻辑 -->
+    <script>
+        const { createApp } = Vue;
+
+        createApp({
+            data() {
+                return {
+                    currentTab: 'global',
+                    tabs: [
+                        { id: 'global', name: '全局配置' },
+                        { id: 'sensors', name: '设备与字典' },
+                        { id: 'linkage', name: '边缘联动' },
+                        { id: 'json', name: '导入与导出' }
+                    ],
+                    activeSensorIdx: 0,
+                    
+                    // ⚡ 新增：系统固件真实信息槽位
+                    sysinfo: {
+                        firmware_ver: "获取中...",
+                        compile_date: "获取中...",
+                        idf_ver: "获取中..."
+                    },
+                    
+                    // 解耦出单独的文本框双向绑定变量
+                    currentJsonText: "",
+                    
+                    cfg: {
+                        version: "4.1",
+                        gateway_config: {
+                            device_id: "GW_ESP32S3_001",
+                            mqtt_broker: "mqtt://192.168.1.100:1883",
+                            mqtt_user: "admin",
+                            mqtt_pass: "123456",
+                            sub_topics: ["/gw/cmd/GW_ESP32S3_001", "/gw/broadcast"],
+                            upload_interval_ms: 10000,
+                            local_tags: [
+                                { tag_id: 501, persist: true, scale: 1.0, offset: 0.0 },
+                                { tag_id: 502, persist: true, scale: 1.0, offset: 0.0 },
+                                { tag_id: 510, persist: false, scale: 100.0, offset: -5.0 }
+                            ]
+                        },
+                        sensors: [
+                            {
+                                name: "Modbus_Env_Meter",
+                                status_tag_id: 2001,
+                                transport: 0,
+                                protocol: 0,
+                                poll_interval_ms: 2000,
+                                timeout_ms: 500,
+                                slave_id: 1,
+                                func_code: 3,
+                                start_reg: 0,
+                                reg_count: 2,
+                                rules: [
+                                    { name: "temperature", target_tag_id: 3001, offset: 0, type: 2, scale: 0.1, writable: false, persist: false },
+                                    { name: "humidity", target_tag_id: 3002, offset: 2, type: 2, scale: 0.1, writable: false, persist: false }
+                                ]
+                            }
+                        ],
+                        linkage_rules: [
+                            {
+                                name: "Auto_Cooling_Fan",
+                                enable: true,
+                                condition: "TAG(3001) > 35.0",
+                                action_tag_id: 501,
+                                action_value: 1.0
+                            }
+                        ]
+                    }
+                }
+            },
+            computed: {
+                subTopicsStr: {
+                    get() { return this.cfg.gateway_config.sub_topics.join(', '); },
+                    set(val) { this.cfg.gateway_config.sub_topics = val.split(',').map(s => s.trim()).filter(s => s); }
+                }
+            },
+            watch: {
+                // 深度监听模式：当 UI 面板中的 cfg 被任意修改时，自动将其格式化并覆盖文本框
+                cfg: {
+                    handler(newVal) {
+                        this.currentJsonText = JSON.stringify(newVal, null, 2);
+                    },
+                    deep: true,
+                    immediate: true
+                }
+            },
+            mounted() {
+                // ⚡ 页面加载时，尝试去拉取网关底层的真实系统信息
+                fetch('/api/sysinfo')
+                    .then(res => res.json())
+                    .then(data => {
+                        this.sysinfo = data;
+                    })
+                    .catch(err => {
+                        console.warn("未能获取到设备固件信息 (可能是离线编辑模式)");
+                        this.sysinfo.firmware_ver = "离线模式";
+                        this.sysinfo.compile_date = "N/A";
+                    });
+            },
+            methods: {
+                getTransportName(val) { return ['RS485总线', 'W5100S以太网', 'Wi-Fi'][val] || '未知'; },
+                getProtocolName(val) { return ['Modbus RTU', 'Modbus TCP', '非标定制'][val] || '未知'; },
+                
+                // --- 🚀 新增：JSON 文本覆盖解析同步 ---
+                applyJsonToUI() {
+                    try {
+                        const parsed = JSON.parse(this.currentJsonText);
+                        this.cfg = parsed;
+                        alert("✅ JSON 源码校验通过，配置界面已同步更新！");
+                    } catch(e) {
+                        alert("❌ 导入失败，JSON 语法存在错误：\n" + e.message);
+                    }
+                },
+
+                // --- 🚀 新增：本地文件导入功能 ---
+                importJsonFile(event) {
+                    const file = event.target.files[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const parsed = JSON.parse(e.target.result);
+                            this.cfg = parsed; // 这会触发 watcher，进而更新 textarea
+                            alert("✅ 配置文件导入成功，系统界面已刷新！");
+                        } catch (err) {
+                            alert("❌ 读取失败，不是有效的 JSON 格式文件：\n" + err.message);
+                        }
+                        event.target.value = ''; // 重置文件选择器，防止相同文件无法连续导入
+                    };
+                    reader.readAsText(file);
+                },
+
+                addLocalTag() {
+                    if (!this.cfg.gateway_config.local_tags) {
+                        this.cfg.gateway_config.local_tags = [];
+                    }
+                    this.cfg.gateway_config.local_tags.push({
+                        tag_id: 0, persist: false, scale: 1.0, offset: 0.0
+                    });
+                },
+                removeLocalTag(idx) {
+                    this.cfg.gateway_config.local_tags.splice(idx, 1);
+                },
+                
+                addSensor() {
+                    this.cfg.sensors.push({
+                        name: "New_Device_" + (this.cfg.sensors.length + 1),
+                        status_tag_id: 2000 + this.cfg.sensors.length + 1,
+                        transport: 0, protocol: 0, poll_interval_ms: 1000, timeout_ms: 500,
+                        slave_id: 1, func_code: 3, start_reg: 0, reg_count: 1, rules: []
+                    });
+                    this.activeSensorIdx = this.cfg.sensors.length - 1;
+                },
+                removeSensor(idx) {
+                    if(confirm('确定删除此设备及其所有测点吗？')) {
+                        this.cfg.sensors.splice(idx, 1);
+                        this.activeSensorIdx = this.cfg.sensors.length > 0 ? 0 : null;
+                    }
+                },
+                
+                addRule() {
+                    if (this.activeSensorIdx === null) return;
+                    let sensor = this.cfg.sensors[this.activeSensorIdx];
+                    let rulesCount = sensor.rules ? sensor.rules.length : 0;
+                    if (!sensor.rules) sensor.rules = [];
+                    sensor.rules.push({
+                        name: "tag_" + (rulesCount + 1), target_tag_id: 3000 + rulesCount + 1, offset: rulesCount * 2,
+                        type: 0, scale: 1.0, writable: false, persist: false
+                    });
+                },
+                removeRule(rIdx) {
+                    this.cfg.sensors[this.activeSensorIdx].rules.splice(rIdx, 1);
+                },
+
+                addLinkage() {
+                    this.cfg.linkage_rules.push({
+                        name: "New_Logic_" + (this.cfg.linkage_rules.length + 1),
+                        enable: true, condition: "", action_tag_id: 0, action_value: 0.0
+                    });
+                },
+                removeLinkage(idx) {
+                    this.cfg.linkage_rules.splice(idx, 1);
+                },
+
+                downloadJson() {
+                    // 使用 this.currentJsonText 确保下载的永远是当前最新态
+                    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(this.currentJsonText);
+                    const downloadAnchorNode = document.createElement('a');
+                    downloadAnchorNode.setAttribute("href", dataStr);
+                    downloadAnchorNode.setAttribute("download", "sensors.json");
+                    document.body.appendChild(downloadAnchorNode);
+                    downloadAnchorNode.click();
+                    downloadAnchorNode.remove();
+                    
+                    alert("组态文件已成功生成！\n请将 sensors.json 导入网关的 Web UI，或直接烧录进 LittleFS。");
+                }
+            }
+        }).mount('#app')
+    </script>
+</body>
+</html>
