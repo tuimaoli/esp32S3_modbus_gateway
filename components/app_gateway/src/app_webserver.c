@@ -1,7 +1,6 @@
 /**
  * @file app_webserver.c
  * @brief 应用层：RESTful API 与 Captive Portal 可视化融合前端
- * @note V3.0 新增本地 Web OTA 固件升级引擎 (支持 Ping-Pong 双分区与防滚回保护)
  */
 #include "app_webserver.h"
 #include "config_manager.h"
@@ -9,12 +8,13 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "app_ota.h"       // 架构修正：引入解耦后的应用层 OTA 管理器
+#include "esp_app_desc.h"  // ⚡ 引入固件描述结构体头文件
+#include "app_ota.h"       
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
-#include <sys/param.h>
+#include <sys/param.h>     // 修复 MIN 宏报错的关键头文件
 
 static const char *TAG = "WEB_API";
 
@@ -22,7 +22,7 @@ static const char *TAG = "WEB_API";
 extern bool bsp_wifi_try_connect_and_get_ip(const char* ssid, const char* pass, char* out_ip, uint32_t timeout_ms);
 
 /* ============================================================
- * 融合前端 HTML (新增 OTA 升级标签页与进度条逻辑)
+ * 融合前端 HTML (保持不变)
  * ============================================================ */
 static const char* INDEX_HTML = 
 "<!DOCTYPE html>\n"
@@ -121,7 +121,6 @@ static const char* INDEX_HTML =
 "      }).catch(e=>{ showMsg('❌ 请求断开', true); btn.innerText = '重试'; btn.disabled = false; });\n"
 "    }\n"
 "    \n"
-"    // 原生 XMLHttpRequest 实现带进度的 OTA 文件上传\n"
 "    function startOTA() {\n"
 "      let fileInput = document.getElementById('ota_file');\n"
 "      if (fileInput.files.length === 0) { showMsg('❌ 请先选择 .bin 文件', true); return; }\n"
@@ -183,6 +182,20 @@ static esp_err_t api_get_config_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ⚡ 新增：获取底层固件真实烙印信息的 API
+static esp_err_t api_get_sysinfo_handler(httpd_req_t *req) {
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    char resp[256];
+    // 将编译时自动生成的 版本号、日期、时间 组装返回
+    snprintf(resp, sizeof(resp), 
+             "{\"firmware_ver\": \"%s\", \"compile_date\": \"%s %s\", \"idf_ver\": \"%s\"}",
+             app_desc->version, app_desc->date, app_desc->time, app_desc->idf_ver);
+             
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
 static esp_err_t api_post_config_handler(httpd_req_t *req) {
     char *buf = malloc(req->content_len + 1);
     if (!buf) return HTTPD_SOCK_ERR_FAIL;
@@ -238,11 +251,7 @@ static esp_err_t api_post_wifi_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-/* ============================================================
- * 【重构核心】解耦后的本地 Web OTA 接收引擎
- * ============================================================ */
 static esp_err_t api_post_ota_handler(httpd_req_t *req) {
-    // 1. 通知 OTA 管理器准备好写入环境
     if (app_ota_begin() != APP_OTA_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA Begin Failed");
         return ESP_FAIL;
@@ -252,19 +261,16 @@ static esp_err_t api_post_ota_handler(httpd_req_t *req) {
     int received = 0;
     int remaining = req->content_len;
     
-    // 2. 边收 HTTP 流，边喂给 OTA 管理器
     while (remaining > 0) {
         int recv_len = httpd_req_recv(req, buf, MIN(remaining, sizeof(buf)));
         if (recv_len <= 0) {
-            if (recv_len == HTTPD_SOCK_ERR_TIMEOUT) continue; // 允许超时重试
-            
+            if (recv_len == HTTPD_SOCK_ERR_TIMEOUT) continue; 
             ESP_LOGE(TAG, "HTTP RX Error!");
-            app_ota_abort(); // 中断回滚
+            app_ota_abort(); 
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Rx Error");
             return ESP_FAIL;
         }
         
-        // 交给下层刷入 Flash
         if (app_ota_write_chunk(buf, recv_len) != APP_OTA_OK) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Flash Write Error");
             return ESP_FAIL;
@@ -272,21 +278,17 @@ static esp_err_t api_post_ota_handler(httpd_req_t *req) {
         
         remaining -= recv_len;
         received += recv_len;
-        vTaskDelay(pdMS_TO_TICKS(1)); // 喂狗防阻塞
+        vTaskDelay(pdMS_TO_TICKS(1)); 
     }
 
-    // 3. 接收完毕，通知管理器进行校验并切换启动分区
     if (app_ota_end() != APP_OTA_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA Validation Failed");
         return ESP_FAIL;
     }
     
-    // 4. 响应前端成功，优雅重启
     httpd_resp_sendstr(req, "{\"status\": \"success\"}");
-    
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();
-    
     return ESP_OK;
 }
 
@@ -297,9 +299,6 @@ static esp_err_t captive_portal_redirect_handler(httpd_req_t *req, httpd_err_cod
     return ESP_OK;
 }
 
-/* ============================================================
- * 启动 Web 服务
- * ============================================================ */
 void app_webserver_start(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 10;
@@ -310,6 +309,10 @@ void app_webserver_start(void) {
         httpd_uri_t uri_root = { .uri = "/", .method = HTTP_GET, .handler = index_html_handler };
         httpd_register_uri_handler(server, &uri_root);
 
+        // 注册 sysinfo 路由
+        httpd_uri_t uri_get_sysinfo = { .uri = "/api/sysinfo", .method = HTTP_GET, .handler = api_get_sysinfo_handler };
+        httpd_register_uri_handler(server, &uri_get_sysinfo);
+
         httpd_uri_t uri_get_config = { .uri = "/api/config", .method = HTTP_GET, .handler = api_get_config_handler };
         httpd_register_uri_handler(server, &uri_get_config);
 
@@ -319,7 +322,6 @@ void app_webserver_start(void) {
         httpd_uri_t uri_post_wifi = { .uri = "/api/wifi", .method = HTTP_POST, .handler = api_post_wifi_handler };
         httpd_register_uri_handler(server, &uri_post_wifi);
         
-        // 【新增路由】：注册 OTA 二进制流接收接口
         httpd_uri_t uri_post_ota = { .uri = "/api/ota", .method = HTTP_POST, .handler = api_post_ota_handler };
         httpd_register_uri_handler(server, &uri_post_ota);
         
