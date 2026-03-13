@@ -10,6 +10,7 @@
 #include "app_ota.h"         
 #include "esp_log.h"
 #include "cJSON.h"
+#include "utils.h"           // 架构修正：引入全新封装的全局通用工具库
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -113,7 +114,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             if (root) {
                 cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
                 if (cmd && cmd->valuestring) {
-                    // 指令 1：写本地变量 (例: {"cmd": "write_tag", "target_tag_id": 501, "value": 1.0})
+                    // 指令 1：写本地变量
                     if (strcmp(cmd->valuestring, "write_tag") == 0) {
                         cJSON *tag_id = cJSON_GetObjectItem(root, "target_tag_id");
                         cJSON *val = cJSON_GetObjectItem(root, "value");
@@ -129,6 +130,36 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                             char *dl_url = strdup(url->valuestring);
                             // 开启独立的后台下载线程，绝不阻塞 MQTT 心跳！
                             xTaskCreate(mqtt_ota_download_task, "mqtt_ota", 8192, dl_url, 5, NULL);
+                        }
+                    }
+                    // 新增指令 3：远程拉取当前配置文件
+                    else if (strcmp(cmd->valuestring, "read_config") == 0) {
+                        char *cfg_str = config_manager_get_json();
+                        if (cfg_str) {
+                            char topic_buf[128];
+                            snprintf(topic_buf, sizeof(topic_buf), "/gw/%s/config_resp", gw_cfg->device_id);
+                            esp_mqtt_client_publish(g_mqtt_client, topic_buf, cfg_str, 0, 0, 0);
+                            free(cfg_str);
+                        }
+                    }
+                    // 新增指令 4：远程下发并覆盖配置文件
+                    else if (strcmp(cmd->valuestring, "write_config") == 0) {
+                        cJSON *new_cfg = cJSON_GetObjectItem(root, "data");
+                        if (new_cfg) {
+                            char *new_cfg_str = cJSON_PrintUnformatted(new_cfg);
+                            char err_msg[128] = {0};
+                            
+                            // 调用 Utils 工具进行严格防呆校验
+                            if (utils_validate_gateway_config(new_cfg_str, err_msg, sizeof(err_msg))) {
+                                ESP_LOGI(TAG, "Remote Config valid, saving and rebooting...");
+                                config_manager_save_json(new_cfg_str);
+                                free(new_cfg_str);
+                                vTaskDelay(pdMS_TO_TICKS(1000));
+                                esp_restart();
+                            } else {
+                                ESP_LOGE(TAG, "Remote Config invalid: %s", err_msg);
+                                free(new_cfg_str);
+                            }
                         }
                     }
                 }

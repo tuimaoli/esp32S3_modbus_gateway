@@ -5,6 +5,7 @@ idf_component_register(
     #"src/sensor_parsers.c"
     "src/register_map.c"
     "src/modbus_template.c"
+    "src/utils.c"
     INCLUDE_DIRS "include"
-    REQUIRES bsp
+    REQUIRES bsp json
 )
