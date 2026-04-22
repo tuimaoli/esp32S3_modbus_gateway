@@ -43,7 +43,7 @@ static void linkage_task(void *arg) {
 
                 float eval_result = 0.0f;
                 
-                // ⚡ 核心威力：直接将表达式扔给引擎计算
+                // 核心威力：直接将表达式扔给引擎计算
                 bool eval_success = utils_expr_eval(rule->condition, &eval_result, rtdb_var_fetch_cb);
                 
                 if (eval_success) {

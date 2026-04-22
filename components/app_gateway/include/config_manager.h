@@ -12,9 +12,38 @@
 extern "C" {
 #endif
 
-/* ============================================================
- * V4.0 新增：边缘联动规则 (Edge Linkage Rule) 数据模型
- * ============================================================ */
+// 串口物理类型
+typedef enum {
+    PORT_HW_NATIVE = 0,   // ESP32 原生 UART
+    PORT_HW_SC16IS750     // I2C 扩展芯片
+} port_hw_type_e;
+
+// 串口业务角色
+typedef enum {
+    PORT_ROLE_MASTER = 0, // 南向采集 (主动轮询)
+    PORT_ROLE_SLAVE       // 北向被采 (响应上位机)
+} port_role_e;
+
+// 面向对象动态串口配置树
+typedef struct {
+    int port_id;          // 逻辑编号 (如 1, 2, 3)
+    port_hw_type_e hw_type;
+    port_role_e role;
+    int baud_rate;
+    
+    // 原生 UART 专用引脚
+    int native_uart_num;  // 1 或 2
+    int tx_pin;
+    int rx_pin;
+    int rts_pin;
+    
+    // SC16IS750 专用
+    uint8_t i2c_addr;
+    
+    // Slave 角色专用
+    int slave_id;
+} serial_port_cfg_t;
+
 typedef struct {
     char name[32];
     bool enable;
@@ -53,9 +82,11 @@ typedef struct {
     int  sub_topic_count;
     int32_t upload_interval_ms;  // 改为有符号 32 位整型，<=0 代表关闭主动上报
 
-    // V4.1 彻底解耦：支持任意数量本地 IO 的动态配置与标定
-    local_tag_cfg_t local_tags[16]; 
+    local_tag_cfg_t local_tags[16];  // 支持任意数量本地 IO 的动态配置与标定
     int local_tag_count;
+        
+    serial_port_cfg_t ports[8]; // 多串口动态配置表
+    int port_count;
 } gateway_config_t;
 
 /* ============================================================

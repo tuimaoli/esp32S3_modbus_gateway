@@ -102,6 +102,34 @@ bool config_manager_load(sensor_device_t **out_sensors, int *out_count) {
                 g_gw_config.sub_topic_count++;
             }
         }
+        //  解析动态分配的串口字典
+        cJSON *ports = cJSON_GetObjectItem(gw_cfg_node, "ports");
+        g_gw_config.port_count = 0;
+        if (ports && cJSON_IsArray(ports)) {
+            int port_cnt = cJSON_GetArraySize(ports);
+            for (int i = 0; i < port_cnt && i < 8; i++) {
+                cJSON *p_node = cJSON_GetArrayItem(ports, i);
+                serial_port_cfg_t *pcfg = &g_gw_config.ports[i];
+                pcfg->port_id = cJSON_GetObjectItem(p_node, "port_id")->valueint;
+                pcfg->hw_type = cJSON_GetObjectItem(p_node, "hw_type")->valueint;
+                pcfg->role = cJSON_GetObjectItem(p_node, "role")->valueint;
+                pcfg->baud_rate = cJSON_GetObjectItem(p_node, "baud_rate")->valueint;
+                
+                if (pcfg->hw_type == PORT_HW_NATIVE) {
+                    pcfg->native_uart_num = cJSON_GetObjectItem(p_node, "native_uart_num")->valueint;
+                    pcfg->tx_pin = cJSON_GetObjectItem(p_node, "tx_pin")->valueint;
+                    pcfg->rx_pin = cJSON_GetObjectItem(p_node, "rx_pin")->valueint;
+                    pcfg->rts_pin = cJSON_GetObjectItem(p_node, "rts_pin")->valueint;
+                } else {
+                    pcfg->i2c_addr = cJSON_GetObjectItem(p_node, "i2c_addr")->valueint;
+                }
+                
+                if (pcfg->role == PORT_ROLE_SLAVE) {
+                    pcfg->slave_id = cJSON_GetObjectItem(p_node, "slave_id") ? cJSON_GetObjectItem(p_node, "slave_id")->valueint : 1;
+                }
+                g_gw_config.port_count++;
+            }
+        }
     }
 
     // ==========================================

@@ -1,4 +1,4 @@
-idf_component_register(SRCS "src/bsp_uart.c"
+idf_component_register(SRCS 
                             "src/bsp_i2c.c"
                             "src/bsp_gpio.c"
                             "src/bsp_w5100s.c"
@@ -8,6 +8,9 @@ idf_component_register(SRCS "src/bsp_uart.c"
                             "src/bsp_wifi.c"
                             "src/bsp_fs.c"
                             "src/bsp_ads1115.c"
+
+                            "src/bsp_sc16is750.c"
+                            "src/bsp_uart_native.c"
                        INCLUDE_DIRS "include" "src" "src/Ethernet" "src/Ethernet/W5100" 
                        REQUIRES driver esp_wifi esp_netif esp_event littlefs esp_http_client json lwip mdns)
 
