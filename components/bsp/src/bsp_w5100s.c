@@ -85,9 +85,9 @@ esp_err_t bsp_w5100s_init(const bsp_w5100s_config_t *config) {
     
     wiz_NetInfo netInfo = {
         .mac = {0x00, 0x08, 0xdc, 0x11, 0x22, 0x33},
-        .ip = {172, 16, 10, 187},
+        .ip = {172, 16, 10, 18},
         .sn = {255, 255, 255, 0},
-        .gw = {172, 16, 10, 187},
+        .gw = {172, 16, 10, 1},
         .dns = {8, 8, 8, 8},
         .dhcp = NETINFO_STATIC
     };
